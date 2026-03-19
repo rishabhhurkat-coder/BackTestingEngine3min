@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import calendar
+import io
 import subprocess
 import sys
 from pathlib import Path
 import tempfile
 from typing import Any
 from uuid import uuid4
+import zipfile
 
 import pandas as pd
 import streamlit as st
@@ -150,6 +152,13 @@ def resolve_data_dir(path_value: str) -> Path:
         folder = BASE_DIR / folder
 
     return folder.resolve()
+
+
+def resolve_main_workspace_dir(path_value: str) -> Path:
+    folder = resolve_data_dir(path_value)
+    if folder.name in {"Raw Files", "Input Files", "Output Files"}:
+        return folder.parent
+    return folder
 
 
 def browse_for_folder(current_path: str) -> str | None:
@@ -430,6 +439,10 @@ def build_upload_signature(uploaded_files: list[Any]) -> tuple[tuple[str, int], 
     return tuple(sorted(signature))
 
 
+def folder_has_csvs(folder: Path) -> bool:
+    return any(folder.glob("*.csv"))
+
+
 def sync_uploaded_raw_files(uploaded_files: list[Any], main_dir: Path) -> tuple[str, str]:
     raw_dir, input_dir, _ = ensure_workspace_dirs(main_dir)
     clear_csv_files(raw_dir)
@@ -441,6 +454,18 @@ def sync_uploaded_raw_files(uploaded_files: list[Any], main_dir: Path) -> tuple[
 
     summary = process_raw_folder(raw_dir, input_dir)
     return build_processing_feedback(summary)
+
+
+def build_output_trades_zip(output_dir: Path) -> bytes | None:
+    csv_paths = sorted(output_dir.glob("*.csv"))
+    if not csv_paths:
+        return None
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for csv_path in csv_paths:
+            archive.writestr(csv_path.name, csv_path.read_bytes())
+    return buffer.getvalue()
 
 
 def build_processing_feedback(summary) -> tuple[str, str]:
@@ -1249,6 +1274,7 @@ def main() -> None:
     st.session_state.setdefault("selected_symbol", None)
     st.session_state.setdefault("cloud_workspace_session_id", str(uuid4()))
     st.session_state.setdefault("cloud_raw_upload_signature", ())
+    st.session_state.setdefault("cloud_uploader_nonce", 0)
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
     if (
         not st.session_state.main_dir_path_input
@@ -1391,43 +1417,58 @@ def main() -> None:
                 if st.button("Main Folder", use_container_width=True):
                     selected_folder = browse_for_folder(st.session_state.main_dir_path_input)
                     if selected_folder:
-                        selected_main_dir = resolve_data_dir(selected_folder)
+                        selected_main_dir = resolve_main_workspace_dir(selected_folder)
                         st.session_state.main_dir_path_input = str(selected_main_dir)
                         st.session_state.data_dir_path_input = str(selected_main_dir / "Input Files")
                         st.session_state.output_dir_path_input = str(selected_main_dir / "Output Files")
                         st.session_state.selected_symbol = None
                         st.rerun()
             else:
-                st.info("Select the folder that contains your raw CSV files. The app will upload that folder and process it automatically for this browser session.")
-                uploaded_raw_files = st.file_uploader(
-                    "Upload Raw Files Folder",
-                    type="csv",
-                    accept_multiple_files="directory",
-                    key="cloud_raw_uploads",
-                )
-                if uploaded_raw_files:
-                    raw_dir, input_dir, output_dir = ensure_workspace_dirs(cloud_workspace_dir)
-                    current_upload_signature = build_upload_signature(uploaded_raw_files)
-                    has_uploaded_raw_files = any(raw_dir.glob("*.csv"))
-                    has_processed_input_files = any(input_dir.glob("*.csv"))
-                    needs_cloud_sync = (
-                        current_upload_signature != st.session_state.cloud_raw_upload_signature
-                        or not has_uploaded_raw_files
-                        or not has_processed_input_files
+                raw_dir, input_dir, output_dir = ensure_workspace_dirs(cloud_workspace_dir)
+                has_processed_input_files = folder_has_csvs(input_dir)
+                st.session_state.main_dir_path_input = str(cloud_workspace_dir)
+                st.session_state.data_dir_path_input = str(input_dir)
+                st.session_state.output_dir_path_input = str(output_dir)
+
+                if has_processed_input_files:
+                    st.success("Raw files processed for this browser session.")
+                else:
+                    st.info("Select the folder that contains your raw CSV files. The app will upload that folder and process it automatically for this browser session.")
+                    uploaded_raw_files = st.file_uploader(
+                        "Upload Raw Files Folder",
+                        type="csv",
+                        accept_multiple_files="directory",
+                        key=f"cloud_raw_uploads_{st.session_state.cloud_uploader_nonce}",
                     )
-                    st.session_state.main_dir_path_input = str(cloud_workspace_dir)
-                    st.session_state.data_dir_path_input = str(input_dir)
-                    st.session_state.output_dir_path_input = str(output_dir)
-                    if needs_cloud_sync:
-                        with st.spinner("Uploading and processing raw files..."):
-                            level, message = sync_uploaded_raw_files(uploaded_raw_files, cloud_workspace_dir)
-                        st.session_state.cloud_raw_upload_signature = current_upload_signature
-                        st.session_state.process_feedback_level = level
-                        st.session_state.process_feedback_message = message
-                        st.session_state.selected_symbol = None
-                        list_symbols.clear()
-                        load_data.clear()
-                        st.rerun()
+                    if uploaded_raw_files:
+                        current_upload_signature = build_upload_signature(uploaded_raw_files)
+                        has_uploaded_raw_files = folder_has_csvs(raw_dir)
+                        needs_cloud_sync = (
+                            current_upload_signature != st.session_state.cloud_raw_upload_signature
+                            or not has_uploaded_raw_files
+                            or not has_processed_input_files
+                        )
+                        if needs_cloud_sync:
+                            with st.spinner("Uploading and processing raw files..."):
+                                level, message = sync_uploaded_raw_files(uploaded_raw_files, cloud_workspace_dir)
+                            st.session_state.cloud_raw_upload_signature = current_upload_signature
+                            st.session_state.process_feedback_level = level
+                            st.session_state.process_feedback_message = message
+                            st.session_state.selected_symbol = None
+                            list_symbols.clear()
+                            load_data.clear()
+                            st.rerun()
+
+                if st.button("Upload Different Raw Folder", use_container_width=True):
+                    clear_csv_files(raw_dir)
+                    clear_csv_files(input_dir)
+                    clear_csv_files(output_dir)
+                    st.session_state.cloud_raw_upload_signature = ()
+                    st.session_state.cloud_uploader_nonce += 1
+                    st.session_state.selected_symbol = None
+                    list_symbols.clear()
+                    load_data.clear()
+                    st.rerun()
 
             if is_windows:
                 if st.button("Process Input Files", use_container_width=True):
@@ -1437,7 +1478,7 @@ def main() -> None:
                         st.session_state.process_feedback_message = "Please select the Main Folder first."
                         st.rerun()
 
-                    selected_main_dir = resolve_data_dir(selected_main_raw)
+                    selected_main_dir = resolve_main_workspace_dir(selected_main_raw)
                     raw_dir = selected_main_dir / "Raw Files"
                     input_dir = selected_main_dir / "Input Files"
                     output_dir = selected_main_dir / "Output Files"
@@ -1488,7 +1529,7 @@ def main() -> None:
         st.error("Please select the Main Folder.")
         return
 
-    main_dir = resolve_data_dir(main_dir_raw)
+    main_dir = resolve_main_workspace_dir(main_dir_raw)
     if not main_dir.exists():
         st.error(f"Main folder not found: {main_dir}")
         return
@@ -1522,6 +1563,9 @@ def main() -> None:
         st.error(f"Output folder is not writable: {output_dir}")
         return
 
+    output_zip_bytes = build_output_trades_zip(output_dir)
+    output_zip_name = f"{main_dir.name or 'trades'}_Output_Files.zip"
+
     symbols = list_symbols(str(data_dir))
     if not symbols:
         raw_symbols = list(raw_dir.glob("*.csv"))
@@ -1547,6 +1591,15 @@ def main() -> None:
                 step=1,
                 format="%d",
                 key="qty",
+            )
+            st.download_button(
+                "Download Trades",
+                data=output_zip_bytes or b"",
+                file_name=output_zip_name,
+                mime="application/zip",
+                use_container_width=True,
+                disabled=output_zip_bytes is None,
+                key="download-trades-sidebar",
             )
     else:
         symbol = st.selectbox("Select Scrip", symbol_names, key="selected_symbol")
