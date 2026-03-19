@@ -1406,15 +1406,24 @@ def main() -> None:
                     key="cloud_raw_uploads",
                 )
                 if uploaded_raw_files:
+                    raw_dir, input_dir, output_dir = ensure_workspace_dirs(cloud_workspace_dir)
                     current_upload_signature = build_upload_signature(uploaded_raw_files)
-                    if current_upload_signature != st.session_state.cloud_raw_upload_signature:
-                        level, message = sync_uploaded_raw_files(uploaded_raw_files, cloud_workspace_dir)
+                    has_uploaded_raw_files = any(raw_dir.glob("*.csv"))
+                    has_processed_input_files = any(input_dir.glob("*.csv"))
+                    needs_cloud_sync = (
+                        current_upload_signature != st.session_state.cloud_raw_upload_signature
+                        or not has_uploaded_raw_files
+                        or not has_processed_input_files
+                    )
+                    st.session_state.main_dir_path_input = str(cloud_workspace_dir)
+                    st.session_state.data_dir_path_input = str(input_dir)
+                    st.session_state.output_dir_path_input = str(output_dir)
+                    if needs_cloud_sync:
+                        with st.spinner("Uploading and processing raw files..."):
+                            level, message = sync_uploaded_raw_files(uploaded_raw_files, cloud_workspace_dir)
                         st.session_state.cloud_raw_upload_signature = current_upload_signature
                         st.session_state.process_feedback_level = level
                         st.session_state.process_feedback_message = message
-                        st.session_state.main_dir_path_input = str(cloud_workspace_dir)
-                        st.session_state.data_dir_path_input = str(cloud_workspace_dir / "Input Files")
-                        st.session_state.output_dir_path_input = str(cloud_workspace_dir / "Output Files")
                         st.session_state.selected_symbol = None
                         list_symbols.clear()
                         load_data.clear()
