@@ -51,6 +51,7 @@ TIMEFRAME_LABEL = "3m"
 SESSION_START = "09.15"
 SESSION_END = "15.27"
 CHART_HEIGHT = 700
+SUPPORTED_DATA_EXTENSIONS = (".csv", ".xlsx", ".xlsm")
 SAVED_SIGNAL_COLUMNS = [
     "Symbol",
     "Date",
@@ -136,10 +137,60 @@ SESSION_START_MINUTES = time_to_minutes(SESSION_START)
 SESSION_END_MINUTES = time_to_minutes(SESSION_END)
 
 
+def is_supported_data_file(file_path: Path) -> bool:
+    return file_path.is_file() and file_path.suffix.lower() in SUPPORTED_DATA_EXTENSIONS
+
+
+def list_supported_data_files(folder: Path) -> list[Path]:
+    if not folder.exists():
+        return []
+    return [
+        file_path
+        for file_path in sorted(folder.iterdir())
+        if is_supported_data_file(file_path)
+    ]
+
+
+def read_tabular_file(file_path: Path) -> pd.DataFrame:
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(file_path)
+    if suffix in {".xlsx", ".xlsm"}:
+        return pd.read_excel(file_path)
+    raise ValueError(f"Unsupported file type: {file_path.suffix}")
+
+
+def write_tabular_file(df: pd.DataFrame, file_path: Path) -> None:
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        df.to_csv(file_path, index=False)
+        return
+    if suffix in {".xlsx", ".xlsm"}:
+        df.to_excel(file_path, index=False)
+        return
+    raise ValueError(f"Unsupported file type: {file_path.suffix}")
+
+
+def find_data_file_by_stem(folder: Path, stem: str) -> Path | None:
+    stem_lookup = stem.casefold()
+    for file_path in list_supported_data_files(folder):
+        if file_path.stem.casefold() == stem_lookup:
+            return file_path
+    return None
+
+
+def tabular_mime_type(file_path: Path) -> str:
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        return "text/csv"
+    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
 @st.cache_data(show_spinner=False)
 def list_symbols(data_dir: str) -> dict[str, str]:
     folder = Path(data_dir)
-    return {csv_path.stem: str(csv_path) for csv_path in sorted(folder.glob("*.csv"))}
+    return {file_path.stem: str(file_path) for file_path in list_supported_data_files(folder)}
 
 
 def resolve_data_dir(path_value: str) -> Path:
@@ -424,9 +475,9 @@ def ensure_workspace_dirs(main_dir: Path) -> tuple[Path, Path, Path]:
 
 
 def clear_csv_files(folder: Path) -> None:
-    for csv_path in folder.glob("*.csv"):
+    for file_path in list_supported_data_files(folder):
         try:
-            csv_path.unlink()
+            file_path.unlink()
         except OSError:
             continue
 
@@ -440,7 +491,7 @@ def build_upload_signature(uploaded_files: list[Any]) -> tuple[tuple[str, int], 
 
 
 def folder_has_csvs(folder: Path) -> bool:
-    return any(folder.glob("*.csv"))
+    return bool(list_supported_data_files(folder))
 
 
 def sync_uploaded_csv_folder(uploaded_files: list[Any], target_dir: Path) -> int:
@@ -474,15 +525,15 @@ def normalize_processed_input_df(raw_df: pd.DataFrame) -> pd.DataFrame:
 
 def merge_processed_input_dirs(existing_input_dir: Path, new_input_dir: Path) -> None:
     existing_input_dir.mkdir(parents=True, exist_ok=True)
-    for new_csv_path in sorted(new_input_dir.glob("*.csv")):
-        target_csv_path = existing_input_dir / new_csv_path.name
-        new_df = normalize_processed_input_df(pd.read_csv(new_csv_path))
+    for new_csv_path in list_supported_data_files(new_input_dir):
+        target_csv_path = find_data_file_by_stem(existing_input_dir, new_csv_path.stem) or (existing_input_dir / new_csv_path.name)
+        new_df = normalize_processed_input_df(read_tabular_file(new_csv_path))
         if target_csv_path.exists():
-            existing_df = normalize_processed_input_df(pd.read_csv(target_csv_path))
+            existing_df = normalize_processed_input_df(read_tabular_file(target_csv_path))
             merged_df = normalize_processed_input_df(pd.concat([existing_df, new_df], ignore_index=True))
         else:
             merged_df = new_df
-        merged_df.drop(columns=["DateObj"], errors="ignore").to_csv(target_csv_path, index=False)
+        write_tabular_file(merged_df.drop(columns=["DateObj"], errors="ignore"), target_csv_path)
 
 
 def process_cloud_uploaded_files(
@@ -525,7 +576,7 @@ def process_cloud_uploaded_files(
                     level = "error"
                 messages.append(summary_message)
             finally:
-                for temp_csv_path in temp_processed_dir.glob("*.csv"):
+                for temp_csv_path in list_supported_data_files(temp_processed_dir):
                     try:
                         temp_csv_path.unlink()
                     except OSError:
@@ -558,7 +609,7 @@ def sync_uploaded_raw_files(uploaded_files: list[Any], main_dir: Path) -> tuple[
 
 
 def build_output_trades_zip(output_dir: Path) -> bytes | None:
-    csv_paths = sorted(output_dir.glob("*.csv"))
+    csv_paths = list_supported_data_files(output_dir)
     if not csv_paths:
         return None
 
@@ -580,19 +631,19 @@ def render_cloud_upload_dialog(main_dir: Path) -> None:
     st.caption("Upload any combination of raw, input, and output folders.")
     uploaded_raw_files = st.file_uploader(
         "Upload Raw Files Folder",
-        type="csv",
+        type=["csv", "xlsx", "xlsm"],
         accept_multiple_files="directory",
         key=f"cloud_raw_uploads_{st.session_state.cloud_uploader_nonce}",
     )
     uploaded_input_files = st.file_uploader(
         "Upload Input Files Folder",
-        type="csv",
+        type=["csv", "xlsx", "xlsm"],
         accept_multiple_files="directory",
         key=f"cloud_input_uploads_{st.session_state.cloud_input_uploader_nonce}",
     )
     uploaded_output_files = st.file_uploader(
         "Upload Output Files Folder",
-        type="csv",
+        type=["csv", "xlsx", "xlsm"],
         accept_multiple_files="directory",
         key=f"cloud_output_uploads_{st.session_state.cloud_output_uploader_nonce}",
     )
@@ -672,13 +723,13 @@ def empty_saved_signals_df() -> pd.DataFrame:
 
 
 def output_signal_csv_path(output_dir: Path, symbol: str) -> Path:
-    return output_dir / f"{symbol}.csv"
+    return find_data_file_by_stem(output_dir, symbol) or (output_dir / f"{symbol}.csv")
 
 
 def ensure_output_signal_file(output_dir: Path, symbol: str) -> Path:
     csv_path = output_signal_csv_path(output_dir, symbol)
     if not csv_path.exists():
-        empty_saved_signals_df().to_csv(csv_path, index=False)
+        write_tabular_file(empty_saved_signals_df(), csv_path)
     return csv_path
 
 
@@ -757,7 +808,7 @@ def load_saved_signals_file(csv_path: Path, symbol: str) -> list[dict[str, Any]]
     if not csv_path.exists() or csv_path.stat().st_size == 0:
         return []
 
-    raw_df = pd.read_csv(csv_path)
+    raw_df = read_tabular_file(csv_path)
     normalized_df = normalize_saved_signals_df(raw_df, symbol)
     return normalized_df.to_dict("records")
 
@@ -765,7 +816,7 @@ def load_saved_signals_file(csv_path: Path, symbol: str) -> list[dict[str, Any]]
 def persist_saved_signals_file(csv_path: Path, symbol: str, saved_signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized_df = normalize_saved_signals_df(pd.DataFrame(saved_signals), symbol) if saved_signals else empty_saved_signals_df()
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    normalized_df.to_csv(csv_path, index=False)
+    write_tabular_file(normalized_df, csv_path)
     return normalized_df.to_dict("records")
 
 
@@ -780,7 +831,7 @@ def apply_saved_signals_state(saved_signals: list[dict[str, Any]], symbol: str, 
 
 @st.cache_data(show_spinner=False)
 def load_data(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+    df = read_tabular_file(Path(csv_path))
     df.columns = df.columns.str.strip()
 
     required = ["Date", "Time", "Open", "High", "Low", "Close", "EMA"]
@@ -1712,7 +1763,7 @@ def main() -> None:
 
     symbols = list_symbols(str(data_dir))
     if not symbols:
-        raw_symbols = list(raw_dir.glob("*.csv"))
+        raw_symbols = list_supported_data_files(raw_dir)
         if raw_symbols:
             st.error("No processed CSV files found in Input Files. Click Process Input Files.")
         else:
@@ -2034,8 +2085,8 @@ def main() -> None:
             st.download_button(
                 "Trade Data",
                 data=trade_download_bytes or b"",
-                file_name=f"{symbol}.csv",
-                mime="text/csv",
+                file_name=output_csv_path.name,
+                mime=tabular_mime_type(output_csv_path),
                 use_container_width=True,
                 disabled=trade_download_bytes is None,
                 key="download-trade-data",
@@ -2044,7 +2095,7 @@ def main() -> None:
                 "Updated Input Data",
                 data=input_download_bytes or b"",
                 file_name=input_download_path.name,
-                mime="text/csv",
+                mime=tabular_mime_type(input_download_path),
                 use_container_width=True,
                 disabled=input_download_bytes is None,
                 key="download-input-data",

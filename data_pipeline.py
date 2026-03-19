@@ -8,6 +8,7 @@ import pandas as pd
 
 DATE_OUTPUT_FORMAT = "%d-%b-%y"
 TIME_OUTPUT_FORMAT = "%H.%M"
+SUPPORTED_DATA_EXTENSIONS = (".csv", ".xlsx", ".xlsm")
 
 
 @dataclass
@@ -27,7 +28,7 @@ class ProcessingSummary:
 
 
 def extract_symbol(file_name: str) -> str:
-    name = file_name.replace(".csv", "")
+    name = Path(file_name).stem
     name = name.replace("NSE_", "")
     name = re.sub(r",.*", "", name)
     return name.capitalize()
@@ -35,10 +36,24 @@ def extract_symbol(file_name: str) -> str:
 
 def list_raw_symbols(raw_dir: Path) -> dict[str, list[Path]]:
     symbol_files: dict[str, list[Path]] = {}
-    for csv_path in sorted(raw_dir.glob("*.csv")):
-        symbol = extract_symbol(csv_path.name)
-        symbol_files.setdefault(symbol, []).append(csv_path)
+    source_paths = [
+        source_path
+        for source_path in sorted(raw_dir.iterdir())
+        if source_path.is_file() and source_path.suffix.lower() in SUPPORTED_DATA_EXTENSIONS
+    ]
+    for source_path in source_paths:
+        symbol = extract_symbol(source_path.name)
+        symbol_files.setdefault(symbol, []).append(source_path)
     return symbol_files
+
+
+def read_tabular_file(file_path: Path) -> pd.DataFrame:
+    suffix = file_path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(file_path)
+    if suffix in {".xlsx", ".xlsm"}:
+        return pd.read_excel(file_path)
+    raise ValueError(f"Unsupported file type: {file_path.suffix}")
 
 
 def normalize_cached_time_series(series: pd.Series) -> pd.Series:
@@ -62,7 +77,7 @@ def normalize_cached_time_series(series: pd.Series) -> pd.Series:
 
 
 def clean_symbol(files: list[Path]) -> pd.DataFrame:
-    dfs = [pd.read_csv(csv_path) for csv_path in files]
+    dfs = [read_tabular_file(csv_path) for csv_path in files]
     df = pd.concat(dfs, ignore_index=True)
 
     normalized_columns = {column: str(column).strip() for column in df.columns}
