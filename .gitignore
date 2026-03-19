@@ -1,0 +1,7 @@
+.venv/
+Main Folder/
+archive/generated/
+archive/sample-data/Final Files/
+__pycache__/
+.codex-streamlit-home/
+tv_chart_component/frontend/node_modules/

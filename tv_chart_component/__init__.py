@@ -1,0 +1,1 @@
+from .component import tv_chart_component
