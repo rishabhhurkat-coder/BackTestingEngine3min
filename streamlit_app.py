@@ -443,6 +443,107 @@ def folder_has_csvs(folder: Path) -> bool:
     return any(folder.glob("*.csv"))
 
 
+def sync_uploaded_csv_folder(uploaded_files: list[Any], target_dir: Path) -> int:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    clear_csv_files(target_dir)
+    for uploaded_file in uploaded_files:
+        target_path = target_dir / Path(str(uploaded_file.name)).name
+        target_path.write_bytes(uploaded_file.getbuffer())
+    return len(uploaded_files)
+
+
+def normalize_processed_input_df(raw_df: pd.DataFrame) -> pd.DataFrame:
+    required = ["Date", "Time", "Open", "High", "Low", "Close", "EMA"]
+    safe_df = raw_df.copy()
+    safe_df.columns = safe_df.columns.str.strip()
+    missing = [column for column in required if column not in safe_df.columns]
+    if missing:
+        raise ValueError(f"Missing required processed-input columns: {', '.join(missing)}")
+
+    safe_df = safe_df.loc[:, required].copy()
+    safe_df["Date"] = safe_df["Date"].astype(str).str.strip()
+    safe_df["Time"] = safe_df["Time"].map(normalize_time)
+    numeric_columns = ["Open", "High", "Low", "Close", "EMA"]
+    safe_df[numeric_columns] = safe_df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+    safe_df["DateObj"] = pd.to_datetime(safe_df["Date"], format="%d-%b-%y", errors="coerce")
+    safe_df = safe_df.dropna(subset=["DateObj", "Time", *numeric_columns])
+    safe_df = safe_df.sort_values(["DateObj", "Time"], kind="stable")
+    safe_df = safe_df.drop_duplicates(subset=["Date", "Time"], keep="last").reset_index(drop=True)
+    return safe_df
+
+
+def merge_processed_input_dirs(existing_input_dir: Path, new_input_dir: Path) -> None:
+    existing_input_dir.mkdir(parents=True, exist_ok=True)
+    for new_csv_path in sorted(new_input_dir.glob("*.csv")):
+        target_csv_path = existing_input_dir / new_csv_path.name
+        new_df = normalize_processed_input_df(pd.read_csv(new_csv_path))
+        if target_csv_path.exists():
+            existing_df = normalize_processed_input_df(pd.read_csv(target_csv_path))
+            merged_df = normalize_processed_input_df(pd.concat([existing_df, new_df], ignore_index=True))
+        else:
+            merged_df = new_df
+        merged_df.drop(columns=["DateObj"], errors="ignore").to_csv(target_csv_path, index=False)
+
+
+def process_cloud_uploaded_files(
+    uploaded_raw_files: list[Any],
+    uploaded_input_files: list[Any],
+    uploaded_output_files: list[Any],
+    process_uploaded_input: bool,
+    main_dir: Path,
+) -> tuple[str, str]:
+    raw_dir, input_dir, output_dir = ensure_workspace_dirs(main_dir)
+    messages: list[str] = []
+    level = "success"
+
+    if uploaded_output_files:
+        sync_uploaded_csv_folder(uploaded_output_files, output_dir)
+        messages.append(f"Loaded {len(uploaded_output_files)} output file(s)")
+
+    if uploaded_input_files:
+        sync_uploaded_csv_folder(uploaded_input_files, input_dir)
+        messages.append(f"Loaded {len(uploaded_input_files)} input file(s)")
+
+    if uploaded_raw_files:
+        sync_uploaded_csv_folder(uploaded_raw_files, raw_dir)
+        messages.append(f"Loaded {len(uploaded_raw_files)} raw file(s)")
+
+        if process_uploaded_input or not uploaded_input_files:
+            temp_processed_dir = Path(tempfile.mkdtemp(prefix="ema_processed_"))
+            try:
+                summary = process_raw_folder(raw_dir, temp_processed_dir)
+                if uploaded_input_files and process_uploaded_input:
+                    merge_processed_input_dirs(input_dir, temp_processed_dir)
+                    messages.append("Merged processed raw files with uploaded input files")
+                else:
+                    clear_csv_files(input_dir)
+                    merge_processed_input_dirs(input_dir, temp_processed_dir)
+                summary_level, summary_message = build_processing_feedback(summary)
+                if summary_level == "warning" and level == "success":
+                    level = "warning"
+                elif summary_level == "error":
+                    level = "error"
+                messages.append(summary_message)
+            finally:
+                for temp_csv_path in temp_processed_dir.glob("*.csv"):
+                    try:
+                        temp_csv_path.unlink()
+                    except OSError:
+                        continue
+                try:
+                    temp_processed_dir.rmdir()
+                except OSError:
+                    pass
+        else:
+            messages.append("Using uploaded input files as-is")
+    elif uploaded_input_files:
+        messages.append("Using uploaded input files as-is")
+
+    if not messages:
+        return "warning", "No files were uploaded."
+    return level, ". ".join(messages)
+
+
 def sync_uploaded_raw_files(uploaded_files: list[Any], main_dir: Path) -> tuple[str, str]:
     raw_dir, input_dir, _ = ensure_workspace_dirs(main_dir)
     clear_csv_files(raw_dir)
@@ -466,6 +567,12 @@ def build_output_trades_zip(output_dir: Path) -> bytes | None:
         for csv_path in csv_paths:
             archive.writestr(csv_path.name, csv_path.read_bytes())
     return buffer.getvalue()
+
+
+def read_file_bytes(file_path: Path) -> bytes | None:
+    if not file_path.exists():
+        return None
+    return file_path.read_bytes()
 
 
 def build_processing_feedback(summary) -> tuple[str, str]:
@@ -1275,6 +1382,8 @@ def main() -> None:
     st.session_state.setdefault("cloud_workspace_session_id", str(uuid4()))
     st.session_state.setdefault("cloud_raw_upload_signature", ())
     st.session_state.setdefault("cloud_uploader_nonce", 0)
+    st.session_state.setdefault("cloud_input_uploader_nonce", 0)
+    st.session_state.setdefault("cloud_output_uploader_nonce", 0)
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
     if (
         not st.session_state.main_dir_path_input
@@ -1429,42 +1538,62 @@ def main() -> None:
                 st.session_state.main_dir_path_input = str(cloud_workspace_dir)
                 st.session_state.data_dir_path_input = str(input_dir)
                 st.session_state.output_dir_path_input = str(output_dir)
-
                 if has_processed_input_files:
-                    st.success("Raw files processed for this browser session.")
-                else:
-                    st.info("Select the folder that contains your raw CSV files. The app will upload that folder and process it automatically for this browser session.")
+                    st.success("Files are ready for this browser session.")
+
+                with st.popover("Upload Files"):
+                    st.caption("Upload any combination of raw, input, and output folders.")
                     uploaded_raw_files = st.file_uploader(
                         "Upload Raw Files Folder",
                         type="csv",
                         accept_multiple_files="directory",
                         key=f"cloud_raw_uploads_{st.session_state.cloud_uploader_nonce}",
                     )
-                    if uploaded_raw_files:
-                        current_upload_signature = build_upload_signature(uploaded_raw_files)
-                        has_uploaded_raw_files = folder_has_csvs(raw_dir)
-                        needs_cloud_sync = (
-                            current_upload_signature != st.session_state.cloud_raw_upload_signature
-                            or not has_uploaded_raw_files
-                            or not has_processed_input_files
+                    uploaded_input_files = st.file_uploader(
+                        "Upload Input Files Folder",
+                        type="csv",
+                        accept_multiple_files="directory",
+                        key=f"cloud_input_uploads_{st.session_state.cloud_input_uploader_nonce}",
+                    )
+                    uploaded_output_files = st.file_uploader(
+                        "Upload Output Files Folder",
+                        type="csv",
+                        accept_multiple_files="directory",
+                        key=f"cloud_output_uploads_{st.session_state.cloud_output_uploader_nonce}",
+                    )
+                    process_choice = "No"
+                    if uploaded_input_files:
+                        process_choice = st.radio(
+                            "Process raw files and merge with uploaded input files?",
+                            ["No", "Yes"],
+                            horizontal=True,
+                            key="cloud_process_choice",
                         )
-                        if needs_cloud_sync:
-                            with st.spinner("Uploading and processing raw files..."):
-                                level, message = sync_uploaded_raw_files(uploaded_raw_files, cloud_workspace_dir)
-                            st.session_state.cloud_raw_upload_signature = current_upload_signature
-                            st.session_state.process_feedback_level = level
-                            st.session_state.process_feedback_message = message
-                            st.session_state.selected_symbol = None
-                            list_symbols.clear()
-                            load_data.clear()
-                            st.rerun()
 
-                if st.button("Upload Different Raw Folder", use_container_width=True):
+                    if st.button("Use Uploaded Files", use_container_width=True):
+                        with st.spinner("Applying uploaded files..."):
+                            level, message = process_cloud_uploaded_files(
+                                uploaded_raw_files=uploaded_raw_files or [],
+                                uploaded_input_files=uploaded_input_files or [],
+                                uploaded_output_files=uploaded_output_files or [],
+                                process_uploaded_input=(process_choice == "Yes"),
+                                main_dir=cloud_workspace_dir,
+                            )
+                        st.session_state.process_feedback_level = level
+                        st.session_state.process_feedback_message = message
+                        st.session_state.selected_symbol = None
+                        list_symbols.clear()
+                        load_data.clear()
+                        st.rerun()
+
+                if st.button("Reset Uploaded Files", use_container_width=True):
                     clear_csv_files(raw_dir)
                     clear_csv_files(input_dir)
                     clear_csv_files(output_dir)
                     st.session_state.cloud_raw_upload_signature = ()
                     st.session_state.cloud_uploader_nonce += 1
+                    st.session_state.cloud_input_uploader_nonce += 1
+                    st.session_state.cloud_output_uploader_nonce += 1
                     st.session_state.selected_symbol = None
                     list_symbols.clear()
                     load_data.clear()
@@ -1563,9 +1692,6 @@ def main() -> None:
         st.error(f"Output folder is not writable: {output_dir}")
         return
 
-    output_zip_bytes = build_output_trades_zip(output_dir)
-    output_zip_name = f"{main_dir.name or 'trades'}_Output_Files.zip"
-
     symbols = list_symbols(str(data_dir))
     if not symbols:
         raw_symbols = list(raw_dir.glob("*.csv"))
@@ -1592,15 +1718,6 @@ def main() -> None:
                 format="%d",
                 key="qty",
             )
-            st.download_button(
-                "Download Trades",
-                data=output_zip_bytes or b"",
-                file_name=output_zip_name,
-                mime="application/zip",
-                use_container_width=True,
-                disabled=output_zip_bytes is None,
-                key="download-trades-sidebar",
-            )
     else:
         symbol = st.selectbox("Select Scrip", symbol_names, key="selected_symbol")
 
@@ -1618,6 +1735,10 @@ def main() -> None:
             return
         apply_saved_signals_state(persisted_saved_signals, symbol, output_csv_path)
         st.session_state.confirm_clear_all = False
+
+    trade_download_bytes = read_file_bytes(output_csv_path)
+    input_download_path = Path(symbols[symbol])
+    input_download_bytes = read_file_bytes(input_download_path)
 
     df = load_data(symbols[symbol])
 
@@ -1890,6 +2011,26 @@ def main() -> None:
                 )
             else:
                 st.caption("Click a candle to automatically create BUY or SELL signal.")
+
+            st.markdown("**Download Data**")
+            st.download_button(
+                "Trade Data",
+                data=trade_download_bytes or b"",
+                file_name=f"{symbol}.csv",
+                mime="text/csv",
+                use_container_width=True,
+                disabled=trade_download_bytes is None,
+                key="download-trade-data",
+            )
+            st.download_button(
+                "Updated Input Data",
+                data=input_download_bytes or b"",
+                file_name=input_download_path.name,
+                mime="text/csv",
+                use_container_width=True,
+                disabled=input_download_bytes is None,
+                key="download-input-data",
+            )
 
 if __name__ == "__main__":
     main()
