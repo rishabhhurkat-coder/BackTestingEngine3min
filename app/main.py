@@ -16,6 +16,7 @@ import streamlit as st
 
 from .component import tv_chart_component, build_dir
 from .data_pipeline import process_raw_folder
+from .google_drive import get_google_drive_connection_status
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 APP_ENTRY = BASE_DIR / "streamlit_app.py"
@@ -1644,6 +1645,7 @@ def main() -> None:
     st.session_state.setdefault("cloud_output_uploader_nonce", 0)
     st.session_state.setdefault("show_upload_dialog", False)
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
+    drive_status = get_google_drive_connection_status()
     if (
         not st.session_state.main_dir_path_input
         and not is_windows
@@ -1781,6 +1783,19 @@ def main() -> None:
             st.header("Filters")
             st.caption(f"Timeframe: {TIMEFRAME_TEXT}")
             st.caption("Session: 09:15 - 15:27")
+            st.markdown("**Google Drive**")
+            if drive_status.connected:
+                st.success(drive_status.message)
+                if drive_status.raw_folder is not None:
+                    st.caption(f"Raw Files: {drive_status.raw_folder.name}")
+                if drive_status.input_folder is not None:
+                    st.caption(f"Input Files: {drive_status.input_folder.name}")
+                if drive_status.output_folder is not None:
+                    st.caption(f"Output Files: {drive_status.output_folder.name}")
+            elif drive_status.configured:
+                st.warning(drive_status.message)
+            else:
+                st.info(drive_status.message)
             if is_windows:
                 if st.button("Main Folder", use_container_width=True):
                     selected_folder = browse_for_folder(st.session_state.main_dir_path_input)
