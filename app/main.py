@@ -858,12 +858,20 @@ def process_selected_drive_raw_symbols(
     temp_input_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        drive_input_files = {
+            file_info.name.casefold(): file_info
+            for file_info in filter_supported_google_drive_files(
+                list_google_drive_folder_files(drive_input_folder_id)
+            )
+        }
         selected_files: list[Any] = []
         for symbol in selected_symbols:
             selected_files.extend(symbol_files.get(symbol, []))
 
         download_google_drive_files_to_dir(selected_files, temp_raw_dir)
         summary = process_raw_folder(temp_raw_dir, temp_input_dir)
+        missing_drive_targets: list[str] = []
+        uploaded_drive_targets: list[str] = []
 
         for symbol in selected_symbols:
             processed_csv_path = temp_input_dir / f"{symbol}.csv"
@@ -873,19 +881,35 @@ def process_selected_drive_raw_symbols(
             target_csv_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(processed_csv_path, target_csv_path)
             remove_other_matching_data_files(input_dir, symbol, target_csv_path)
+            drive_file_name = target_csv_path.name
+            if drive_file_name.casefold() not in drive_input_files:
+                missing_drive_targets.append(drive_file_name)
+                continue
             upload_google_drive_file(
                 folder_id=drive_input_folder_id,
-                file_name=target_csv_path.name,
+                file_name=drive_file_name,
                 content=processed_csv_path.read_bytes(),
                 mime_type="text/csv",
             )
+            uploaded_drive_targets.append(drive_file_name)
 
         level, message = build_processing_feedback(summary)
-        if summary.processed:
-            processed_names = ", ".join(result.symbol for result in summary.processed[:5])
-            extra_count = max(0, len(summary.processed) - 5)
-            suffix = f" (+{extra_count} more)" if extra_count else ""
-            message = f"{message}. Uploaded to Google Drive Input Files: {processed_names}{suffix}"
+        if uploaded_drive_targets:
+            uploaded_preview = ", ".join(uploaded_drive_targets[:5])
+            extra_uploaded = max(0, len(uploaded_drive_targets) - 5)
+            uploaded_suffix = f" (+{extra_uploaded} more)" if extra_uploaded else ""
+            message = f"{message}. Updated in Google Drive Input Files: {uploaded_preview}{uploaded_suffix}"
+        if missing_drive_targets:
+            missing_preview = ", ".join(missing_drive_targets[:5])
+            extra_missing = max(0, len(missing_drive_targets) - 5)
+            missing_suffix = f" (+{extra_missing} more)" if extra_missing else ""
+            message = (
+                f"{message}. Could not create new files in Google Drive Input Files: "
+                f"{missing_preview}{missing_suffix}. "
+                "For My Drive folders, pre-create those CSV files first or move the folder to a Shared Drive."
+            )
+            if level == "success":
+                level = "warning"
         return level, message
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
