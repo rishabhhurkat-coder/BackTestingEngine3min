@@ -34,6 +34,14 @@ class GoogleDriveFolderInfo:
 
 
 @dataclass(frozen=True)
+class GoogleDriveFileInfo:
+    file_id: str
+    name: str
+    mime_type: str
+    size: int | None = None
+
+
+@dataclass(frozen=True)
 class GoogleDriveConnectionStatus:
     configured: bool
     connected: bool
@@ -123,6 +131,39 @@ def _fetch_folder_info(service, folder_id: str) -> GoogleDriveFolderInfo:
         folder_id=str(response.get("id") or folder_id),
         name=str(response.get("name") or folder_id),
     )
+
+
+@st.cache_data(show_spinner=False)
+def list_google_drive_folder_files(folder_id: str) -> list[GoogleDriveFileInfo]:
+    config = load_google_drive_config()
+    if config is None:
+        return []
+
+    service = build_google_drive_service(config)
+    files: list[GoogleDriveFileInfo] = []
+    page_token: str | None = None
+    while True:
+        response = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="nextPageToken, files(id,name,mimeType,size)",
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+            pageToken=page_token,
+            pageSize=200,
+        ).execute()
+        for item in response.get("files", []):
+            files.append(
+                GoogleDriveFileInfo(
+                    file_id=str(item.get("id") or ""),
+                    name=str(item.get("name") or ""),
+                    mime_type=str(item.get("mimeType") or ""),
+                    size=int(item["size"]) if item.get("size") is not None else None,
+                )
+            )
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            break
+    return files
 
 
 @st.cache_data(show_spinner=False)

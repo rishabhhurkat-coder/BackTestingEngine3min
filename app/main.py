@@ -16,7 +16,7 @@ import streamlit as st
 
 from .component import tv_chart_component, build_dir
 from .data_pipeline import process_raw_folder
-from .google_drive import get_google_drive_connection_status
+from .google_drive import get_google_drive_connection_status, list_google_drive_folder_files
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 APP_ENTRY = BASE_DIR / "streamlit_app.py"
@@ -153,6 +153,15 @@ def list_supported_data_files(folder: Path) -> list[Path]:
         for file_path in sorted(folder.iterdir())
         if is_supported_data_file(file_path)
     ]
+
+
+def filter_supported_google_drive_files(file_infos: list[Any]) -> list[Any]:
+    supported_files: list[Any] = []
+    for file_info in file_infos:
+        suffix = Path(str(getattr(file_info, "name", ""))).suffix.lower()
+        if suffix in SUPPORTED_DATA_EXTENSIONS:
+            supported_files.append(file_info)
+    return supported_files
 
 
 def read_tabular_file(file_path: Path) -> pd.DataFrame:
@@ -1644,8 +1653,18 @@ def main() -> None:
     st.session_state.setdefault("cloud_input_uploader_nonce", 0)
     st.session_state.setdefault("cloud_output_uploader_nonce", 0)
     st.session_state.setdefault("show_upload_dialog", False)
+    st.session_state.setdefault("drive_process_choice", "No")
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
     drive_status = get_google_drive_connection_status()
+    drive_raw_files: list[Any] = []
+    drive_raw_files_error = ""
+    if drive_status.connected and drive_status.raw_folder is not None:
+        try:
+            drive_raw_files = filter_supported_google_drive_files(
+                list_google_drive_folder_files(drive_status.raw_folder.folder_id)
+            )
+        except Exception as exc:
+            drive_raw_files_error = str(exc)
     if (
         not st.session_state.main_dir_path_input
         and not is_windows
@@ -1792,6 +1811,22 @@ def main() -> None:
                     st.caption(f"Input Files: {drive_status.input_folder.name}")
                 if drive_status.output_folder is not None:
                     st.caption(f"Output Files: {drive_status.output_folder.name}")
+                if drive_raw_files_error:
+                    st.warning(f"Could not read Drive raw files: {drive_raw_files_error}")
+                elif drive_raw_files:
+                    st.caption(f"Drive raw files found: {len(drive_raw_files)}")
+                    preview_names = ", ".join(file_info.name for file_info in drive_raw_files[:3])
+                    if preview_names:
+                        st.caption(f"Examples: {preview_names}")
+                    st.radio(
+                        "Process Raw Files from Google Drive?",
+                        ["No", "Yes"],
+                        horizontal=True,
+                        key="drive_process_choice",
+                        help="Task 2 only adds the raw-file detection and this choice. Processing will be wired in the next task.",
+                    )
+                else:
+                    st.caption("No supported raw files found in Google Drive yet.")
             elif drive_status.configured:
                 st.warning(drive_status.message)
             else:
@@ -1934,7 +1969,12 @@ def main() -> None:
         if raw_symbols:
             st.error("No processed supported data files found in Input Files. Click Process Input Files.")
         else:
-            if is_windows:
+            if drive_status.connected and drive_raw_files:
+                if st.session_state.get("drive_process_choice") == "Yes":
+                    st.info("Google Drive raw files are ready. Processing selected Drive raw files will be added in the next task.")
+                else:
+                    st.info("Google Drive raw files were found. Choose 'Yes' in 'Process Raw Files from Google Drive?' when you want to process them.")
+            elif is_windows:
                 st.error(f"No raw supported data files found in {raw_dir}")
             else:
                 st.info("Select your raw-files folder from your computer to begin.")
