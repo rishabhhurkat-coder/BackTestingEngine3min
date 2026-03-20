@@ -1090,6 +1090,47 @@ def sync_google_drive_output_files_to_dir(
     return "success", f"Loaded {len(drive_output_files)} output file(s) from Google Drive.", len(drive_output_files)
 
 
+def reload_selected_drive_output_for_symbol(
+    drive_status: Any,
+    symbol: str,
+    output_dir: Path,
+    input_df: pd.DataFrame,
+) -> tuple[str, str, list[dict[str, Any]] | None]:
+    if not getattr(drive_status, "connected", False) or getattr(drive_status, "output_folder", None) is None:
+        return "error", "Google Drive Output Files are not connected yet.", None
+
+    list_google_drive_folder_files.clear()
+    drive_output_files = filter_supported_google_drive_files(
+        list_google_drive_folder_files(drive_status.output_folder.folder_id)
+    )
+    matching_file = next(
+        (
+            file_info
+            for file_info in drive_output_files
+            if Path(file_info.name).stem.casefold() == symbol.casefold()
+        ),
+        None,
+    )
+    if matching_file is None:
+        return "warning", f"No Google Drive Output file exists yet for {display_symbol(symbol)}.", None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target_csv_path = csv_path_for_stem(output_dir, symbol)
+    downloaded_paths = download_google_drive_files_to_dir([matching_file], output_dir)
+    downloaded_path = Path(downloaded_paths[0]) if downloaded_paths else target_csv_path
+    if downloaded_path != target_csv_path and downloaded_path.exists():
+        target_csv_path.write_bytes(downloaded_path.read_bytes())
+        try:
+            downloaded_path.unlink()
+        except OSError:
+            pass
+    remove_other_matching_data_files(output_dir, symbol, target_csv_path)
+
+    loaded_saved_signals = load_saved_signals_file(target_csv_path, symbol, input_df=input_df)
+    persisted_saved_signals = persist_saved_signals_file(target_csv_path, symbol, loaded_saved_signals)
+    return "success", f"Reloaded Google Drive Output data for {display_symbol(symbol)}.", persisted_saved_signals
+
+
 def build_saved_signal_timestamp(date_value: Any, time_value: Any) -> pd.Timestamp:
     normalized_time = normalize_time(time_value).replace(".", ":")
     timestamp = pd.to_datetime(
@@ -2002,6 +2043,8 @@ def main() -> None:
     st.session_state.setdefault("drive_input_sync_choice", None)
     st.session_state.setdefault("drive_input_sync_file_count", 0)
     st.session_state.setdefault("drive_output_sync_completed", False)
+    st.session_state.setdefault("output_reload_feedback_level", None)
+    st.session_state.setdefault("output_reload_feedback_message", "")
     st.session_state.setdefault("output_update_feedback_level", None)
     st.session_state.setdefault("output_update_feedback_message", "")
     st.session_state.setdefault("output_update_manual_download", None)
@@ -2385,6 +2428,8 @@ def main() -> None:
         st.session_state.get("saved_signals_symbol") != symbol
         or st.session_state.get("saved_signals_output_csv") != str(output_csv_path)
     ):
+        st.session_state.output_reload_feedback_level = None
+        st.session_state.output_reload_feedback_message = ""
         st.session_state.output_update_feedback_level = None
         st.session_state.output_update_feedback_message = ""
         st.session_state.output_update_manual_download = None
@@ -2704,6 +2749,35 @@ def main() -> None:
                 )
             else:
                 st.caption("Click a candle to automatically create BUY or SELL signal.")
+
+            st.markdown("**Reload Data**")
+            if st.button("Reload Data", use_container_width=True, key="reload-output-data"):
+                try:
+                    reload_level, reload_message, persisted_saved_signals = reload_selected_drive_output_for_symbol(
+                        drive_status=drive_status,
+                        symbol=symbol,
+                        output_dir=output_dir,
+                        input_df=df,
+                    )
+                except Exception as exc:
+                    reload_level = "error"
+                    reload_message = f"Could not reload Google Drive Output data for {display_symbol(symbol)}: {exc}"
+                    persisted_saved_signals = None
+                st.session_state.output_reload_feedback_level = reload_level
+                st.session_state.output_reload_feedback_message = reload_message
+                if persisted_saved_signals is not None:
+                    apply_saved_signals_state(persisted_saved_signals, symbol, output_csv_path)
+                    st.session_state.confirm_clear_all = False
+                    st.rerun()
+            reload_feedback_level = st.session_state.get("output_reload_feedback_level")
+            reload_feedback_message = str(st.session_state.get("output_reload_feedback_message") or "").strip()
+            if reload_feedback_level and reload_feedback_message:
+                reload_feedback_fn = {
+                    "success": st.success,
+                    "warning": st.warning,
+                    "error": st.error,
+                }.get(reload_feedback_level, st.info)
+                reload_feedback_fn(reload_feedback_message)
 
             st.markdown("**Update Data**")
             if st.button("Update Data", use_container_width=True, key="update-trade-data"):
