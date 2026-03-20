@@ -778,6 +778,7 @@ def update_trade_data_in_google_drive(
         return "error", "Google Drive Output Files are not connected yet.", None
 
     file_name = f"{symbol}.csv"
+    list_google_drive_folder_files.clear()
     existing_drive_files = {
         file_info.name.casefold()
         for file_info in filter_supported_google_drive_files(
@@ -794,17 +795,39 @@ def update_trade_data_in_google_drive(
                 "mime": "text/csv",
             },
         )
-    try:
-        upload_google_drive_file(
-            folder_id=drive_status.output_folder.folder_id,
-            file_name=file_name,
-            content=trade_data_bytes,
-            mime_type="text/csv",
-        )
-    except Exception as exc:
-        return "error", f"Could not update Google Drive Output Files for {display_symbol(symbol)}: {exc}", None
 
-    return "success", f"Updated Google Drive Output Files for {display_symbol(symbol)}.", None
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            upload_google_drive_file(
+                folder_id=drive_status.output_folder.folder_id,
+                file_name=file_name,
+                content=trade_data_bytes,
+                mime_type="text/csv",
+            )
+            list_google_drive_folder_files.clear()
+            return "success", f"Updated Google Drive Output Files for {display_symbol(symbol)}.", None
+        except Exception as exc:
+            last_error = exc
+            error_text = str(exc)
+            retryable_error = any(
+                token in error_text
+                for token in (
+                    "SSL:",
+                    "RECORD_LAYER_FAILURE",
+                    "Connection reset",
+                    "EOF occurred",
+                    "timed out",
+                    "Timeout",
+                    "temporarily unavailable",
+                )
+            )
+            if retryable_error and attempt < 2:
+                time.sleep(1.2 * (attempt + 1))
+                continue
+            break
+
+    return "error", f"Could not update Google Drive Output Files for {display_symbol(symbol)}: {last_error}", None
 
 
 @st.dialog("Upload Files", width="large")
