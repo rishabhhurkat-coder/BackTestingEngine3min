@@ -767,6 +767,30 @@ def build_trade_table_download_bytes(
     return export_df.to_csv(index=False).encode("utf-8")
 
 
+def update_trade_data_in_google_drive(
+    drive_status: Any,
+    symbol: str,
+    trade_data_bytes: bytes | None,
+) -> tuple[str, str]:
+    if trade_data_bytes is None:
+        return "warning", f"No trade data is available to update for {display_symbol(symbol)}."
+    if not getattr(drive_status, "connected", False) or getattr(drive_status, "output_folder", None) is None:
+        return "error", "Google Drive Output Files are not connected yet."
+
+    file_name = f"{symbol}.csv"
+    try:
+        upload_google_drive_file(
+            folder_id=drive_status.output_folder.folder_id,
+            file_name=file_name,
+            content=trade_data_bytes,
+            mime_type="text/csv",
+        )
+    except Exception as exc:
+        return "error", f"Could not update Google Drive Output Files for {display_symbol(symbol)}: {exc}"
+
+    return "success", f"Updated Google Drive Output Files for {display_symbol(symbol)}."
+
+
 @st.dialog("Upload Files", width="large")
 def render_cloud_upload_dialog(main_dir: Path) -> None:
     st.caption("Upload any combination of raw, input, and output folders.")
@@ -1962,6 +1986,8 @@ def main() -> None:
     st.session_state.setdefault("drive_input_sync_choice", None)
     st.session_state.setdefault("drive_input_sync_file_count", 0)
     st.session_state.setdefault("drive_output_sync_completed", False)
+    st.session_state.setdefault("output_update_feedback_level", None)
+    st.session_state.setdefault("output_update_feedback_message", "")
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
     drive_status = get_google_drive_connection_status()
     drive_raw_files: list[Any] = []
@@ -2357,8 +2383,6 @@ def main() -> None:
         symbol=symbol,
         default_qty=int(st.session_state.get("qty", 1) or 1),
     )
-    input_download_path = Path(symbols[symbol])
-    input_download_bytes = read_file_bytes(input_download_path)
 
     min_date = df["Date"].dt.date.min()
     max_date = df["Date"].dt.date.max()
@@ -2661,25 +2685,27 @@ def main() -> None:
             else:
                 st.caption("Click a candle to automatically create BUY or SELL signal.")
 
-            st.markdown("**Download Data**")
-            st.download_button(
-                "Trade Data",
-                data=trade_download_bytes or b"",
-                file_name=f"{symbol}_trade_data.csv",
-                mime="text/csv",
-                use_container_width=True,
-                disabled=trade_download_bytes is None,
-                key="download-trade-data",
-            )
-            st.download_button(
-                "Updated Input Data",
-                data=input_download_bytes or b"",
-                file_name=input_download_path.name,
-                mime=tabular_mime_type(input_download_path),
-                use_container_width=True,
-                disabled=input_download_bytes is None,
-                key="download-input-data",
-            )
+            st.markdown("**Update Data**")
+            if st.button("Update Data", use_container_width=True, key="update-trade-data"):
+                level, message = update_trade_data_in_google_drive(
+                    drive_status=drive_status,
+                    symbol=symbol,
+                    trade_data_bytes=trade_download_bytes,
+                )
+                st.session_state.output_update_feedback_level = level
+                st.session_state.output_update_feedback_message = message
+                if level == "success":
+                    st.session_state.drive_output_sync_completed = False
+                    list_google_drive_folder_files.clear()
+            output_feedback_level = st.session_state.get("output_update_feedback_level")
+            output_feedback_message = str(st.session_state.get("output_update_feedback_message") or "").strip()
+            if output_feedback_level and output_feedback_message:
+                feedback_fn = {
+                    "success": st.success,
+                    "warning": st.warning,
+                    "error": st.error,
+                }.get(output_feedback_level, st.info)
+                feedback_fn(output_feedback_message)
 
 if __name__ == "__main__":
     main()
