@@ -178,6 +178,10 @@ def group_google_drive_files_by_symbol(file_infos: list[Any]) -> dict[str, list[
     return dict(sorted(grouped_files.items(), key=lambda item: item[0].lower()))
 
 
+def display_symbol(symbol: Any) -> str:
+    return str(symbol or "").upper()
+
+
 def trigger_drive_process_dialog() -> None:
     choice = st.session_state.get("drive_process_choice_widget")
     if choice == "Yes":
@@ -830,6 +834,7 @@ def render_drive_process_dialog(
         "Select Drive Scrips to Process",
         symbol_names,
         key="drive_selected_symbols",
+        format_func=display_symbol,
         help="Only the selected scrips will be processed from Google Drive Raw Files.",
     )
 
@@ -2206,7 +2211,12 @@ def main() -> None:
 
     if st.session_state.show_filters:
         with st.sidebar:
-            symbol = st.selectbox("Select Scrip", symbol_names, key="selected_symbol")
+            symbol = st.selectbox(
+                "Select Scrip",
+                symbol_names,
+                key="selected_symbol",
+                format_func=display_symbol,
+            )
             st.number_input(
                 "Qty",
                 min_value=1,
@@ -2215,7 +2225,12 @@ def main() -> None:
                 key="qty",
             )
     else:
-        symbol = st.selectbox("Select Scrip", symbol_names, key="selected_symbol")
+        symbol = st.selectbox(
+            "Select Scrip",
+            symbol_names,
+            key="selected_symbol",
+            format_func=display_symbol,
+        )
 
     output_csv_path = output_signal_csv_path(output_dir, symbol)
     if (
@@ -2461,7 +2476,7 @@ def main() -> None:
     header_left_placeholder.markdown(
         (
             "<div class='header-title-line'>"
-            f"<span class='tv-title'>{symbol} · {TIMEFRAME_LABEL} · NSE</span>"
+            f"<span class='tv-title'>{display_symbol(symbol)} · {TIMEFRAME_LABEL} · NSE</span>"
             f"<span class='header-range-inline'>{range_label}</span>"
             "</div>"
         ),
