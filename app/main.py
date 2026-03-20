@@ -1031,6 +1031,25 @@ def sync_google_drive_input_files_to_dir(
     return "success", f"Loaded {len(drive_input_files)} input file(s) from Google Drive.", len(drive_input_files)
 
 
+def sync_google_drive_output_files_to_dir(
+    drive_status: Any,
+    target_dir: Path,
+) -> tuple[str, str, int]:
+    if not getattr(drive_status, "connected", False) or getattr(drive_status, "output_folder", None) is None:
+        return "warning", "Google Drive Output Files are not connected yet.", 0
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    drive_output_files = filter_supported_google_drive_files(
+        list_google_drive_folder_files(drive_status.output_folder.folder_id)
+    )
+    clear_supported_data_files(target_dir)
+    if not drive_output_files:
+        return "success", "No saved output files were found in Google Drive Output Files.", 0
+
+    download_google_drive_files_to_dir(drive_output_files, target_dir)
+    return "success", f"Loaded {len(drive_output_files)} output file(s) from Google Drive.", len(drive_output_files)
+
+
 def build_saved_signal_timestamp(date_value: Any, time_value: Any) -> pd.Timestamp:
     normalized_time = normalize_time(time_value).replace(".", ":")
     timestamp = pd.to_datetime(
@@ -1871,6 +1890,7 @@ def main() -> None:
     st.session_state.setdefault("drive_dialog_feedback_message", "")
     st.session_state.setdefault("drive_input_sync_choice", None)
     st.session_state.setdefault("drive_input_sync_file_count", 0)
+    st.session_state.setdefault("drive_output_sync_completed", False)
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
     drive_status = get_google_drive_connection_status()
     drive_raw_files: list[Any] = []
@@ -2064,6 +2084,18 @@ def main() -> None:
                 st.session_state.main_dir_path_input = str(cloud_workspace_dir)
                 st.session_state.data_dir_path_input = str(input_dir)
                 st.session_state.output_dir_path_input = str(output_dir)
+                if drive_status.connected and not st.session_state.get("drive_output_sync_completed"):
+                    _, _, output_count = sync_google_drive_output_files_to_dir(drive_status, output_dir)
+                    st.session_state.drive_output_sync_completed = True
+                    if output_count:
+                        st.session_state.saved_signals = []
+                        st.session_state.saved_signals_symbol = None
+                        st.session_state.saved_signals_output_csv = None
+                        st.session_state.latest_signal = None
+                    list_google_drive_folder_files.clear()
+                    list_symbols.clear()
+                    load_data.clear()
+                    st.rerun()
                 if (
                     drive_status.connected
                     and drive_raw_files
