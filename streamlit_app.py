@@ -4,7 +4,7 @@ import calendar
 import io
 import subprocess
 import sys
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 import tempfile
 from typing import Any
 from uuid import uuid4
@@ -536,38 +536,6 @@ def build_upload_signature(uploaded_files: list[Any]) -> tuple[tuple[str, int], 
     return tuple(sorted(signature))
 
 
-def detected_upload_folder_path(uploaded_files: list[Any]) -> str:
-    normalized_parts: list[tuple[str, ...]] = []
-    for uploaded_file in uploaded_files:
-        raw_name = str(getattr(uploaded_file, "name", "") or "").strip()
-        if not raw_name:
-            continue
-        clean_name = raw_name.replace("\\", "/")
-        path_parts = tuple(part for part in PurePosixPath(clean_name).parts[:-1] if part)
-        if path_parts:
-            normalized_parts.append(path_parts)
-
-    if not normalized_parts:
-        return ""
-
-    common_parts = list(normalized_parts[0])
-    for path_parts in normalized_parts[1:]:
-        match_count = 0
-        for left, right in zip(common_parts, path_parts):
-            if left != right:
-                break
-            match_count += 1
-        common_parts = common_parts[:match_count]
-        if not common_parts:
-            break
-
-    if common_parts:
-        return "/".join(common_parts)
-
-    first_parts = normalized_parts[0]
-    return first_parts[0] if first_parts else ""
-
-
 def folder_has_supported_data_files(folder: Path) -> bool:
     return bool(list_supported_data_files(folder))
 
@@ -727,18 +695,18 @@ def read_file_bytes(file_path: Path) -> bytes | None:
 @st.dialog("Upload Files", width="large")
 def render_cloud_upload_dialog(main_dir: Path) -> None:
     st.caption("Upload any combination of raw, input, and output folders.")
+    target_raw_dir, target_input_dir, target_output_dir = ensure_workspace_dirs(main_dir)
     uploaded_raw_files = st.file_uploader(
         "Upload Raw Files Folder",
         type=UPLOAD_DATA_TYPES,
         accept_multiple_files="directory",
         key=f"cloud_raw_uploads_{st.session_state.cloud_uploader_nonce}",
     )
-    raw_upload_path = detected_upload_folder_path(uploaded_raw_files or [])
     st.text_input(
-        "Detected Raw Folder Path",
-        value=raw_upload_path,
+        "Target Raw Folder Path",
+        value=str(target_raw_dir),
         disabled=True,
-        placeholder="No raw folder selected yet",
+        placeholder="No raw folder path available",
     )
     uploaded_input_files = st.file_uploader(
         "Upload Input Files Folder",
@@ -746,12 +714,11 @@ def render_cloud_upload_dialog(main_dir: Path) -> None:
         accept_multiple_files="directory",
         key=f"cloud_input_uploads_{st.session_state.cloud_input_uploader_nonce}",
     )
-    input_upload_path = detected_upload_folder_path(uploaded_input_files or [])
     st.text_input(
-        "Detected Input Folder Path",
-        value=input_upload_path,
+        "Target Input Folder Path",
+        value=str(target_input_dir),
         disabled=True,
-        placeholder="No input folder selected yet",
+        placeholder="No input folder path available",
     )
     uploaded_output_files = st.file_uploader(
         "Upload Output Files Folder",
@@ -759,12 +726,11 @@ def render_cloud_upload_dialog(main_dir: Path) -> None:
         accept_multiple_files="directory",
         key=f"cloud_output_uploads_{st.session_state.cloud_output_uploader_nonce}",
     )
-    output_upload_path = detected_upload_folder_path(uploaded_output_files or [])
     st.text_input(
-        "Detected Output Folder Path",
-        value=output_upload_path,
+        "Target Output Folder Path",
+        value=str(target_output_dir),
         disabled=True,
-        placeholder="No output folder selected yet",
+        placeholder="No output folder path available",
     )
 
     process_choice = "No"
@@ -1607,7 +1573,6 @@ def main() -> None:
     st.session_state.setdefault("filter_source_to", None)
     st.session_state.setdefault("chart_zoomed", False)
     st.session_state.setdefault("main_dir_path_input", "")
-    st.session_state.setdefault("main_dir_path_display", "")
     st.session_state.setdefault("data_dir_path_input", "")
     st.session_state.setdefault("output_dir_path_input", "")
     st.session_state.setdefault("process_feedback_level", None)
@@ -1794,16 +1759,6 @@ def main() -> None:
                     list_symbols.clear()
                     load_data.clear()
                     st.rerun()
-
-            st.session_state.main_dir_path_display = str(
-                st.session_state.get("main_dir_path_input") or ""
-            ).strip()
-            st.text_input(
-                "Selected Main Folder Path",
-                key="main_dir_path_display",
-                disabled=True,
-                placeholder="No folder selected yet",
-            )
 
             if is_windows:
                 if st.button("Process Input Files", use_container_width=True):
