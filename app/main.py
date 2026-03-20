@@ -771,13 +771,29 @@ def update_trade_data_in_google_drive(
     drive_status: Any,
     symbol: str,
     trade_data_bytes: bytes | None,
-) -> tuple[str, str]:
+) -> tuple[str, str, dict[str, Any] | None]:
     if trade_data_bytes is None:
-        return "warning", f"No trade data is available to update for {display_symbol(symbol)}."
+        return "warning", f"No trade data is available to update for {display_symbol(symbol)}.", None
     if not getattr(drive_status, "connected", False) or getattr(drive_status, "output_folder", None) is None:
-        return "error", "Google Drive Output Files are not connected yet."
+        return "error", "Google Drive Output Files are not connected yet.", None
 
     file_name = f"{symbol}.csv"
+    existing_drive_files = {
+        file_info.name.casefold()
+        for file_info in filter_supported_google_drive_files(
+            list_google_drive_folder_files(drive_status.output_folder.folder_id)
+        )
+    }
+    if file_name.casefold() not in existing_drive_files:
+        return (
+            "warning",
+            f"{display_symbol(symbol)} does not exist yet in Google Drive Output Files. Download it below and add it manually.",
+            {
+                "file_name": file_name,
+                "data": trade_data_bytes,
+                "mime": "text/csv",
+            },
+        )
     try:
         upload_google_drive_file(
             folder_id=drive_status.output_folder.folder_id,
@@ -786,9 +802,9 @@ def update_trade_data_in_google_drive(
             mime_type="text/csv",
         )
     except Exception as exc:
-        return "error", f"Could not update Google Drive Output Files for {display_symbol(symbol)}: {exc}"
+        return "error", f"Could not update Google Drive Output Files for {display_symbol(symbol)}: {exc}", None
 
-    return "success", f"Updated Google Drive Output Files for {display_symbol(symbol)}."
+    return "success", f"Updated Google Drive Output Files for {display_symbol(symbol)}.", None
 
 
 @st.dialog("Upload Files", width="large")
@@ -1988,6 +2004,7 @@ def main() -> None:
     st.session_state.setdefault("drive_output_sync_completed", False)
     st.session_state.setdefault("output_update_feedback_level", None)
     st.session_state.setdefault("output_update_feedback_message", "")
+    st.session_state.setdefault("output_update_manual_download", None)
     cloud_workspace_dir = cloud_workspace_root / st.session_state.cloud_workspace_session_id
     drive_status = get_google_drive_connection_status()
     drive_raw_files: list[Any] = []
@@ -2368,6 +2385,9 @@ def main() -> None:
         st.session_state.get("saved_signals_symbol") != symbol
         or st.session_state.get("saved_signals_output_csv") != str(output_csv_path)
     ):
+        st.session_state.output_update_feedback_level = None
+        st.session_state.output_update_feedback_message = ""
+        st.session_state.output_update_manual_download = None
         try:
             ensure_output_signal_file(output_dir, symbol)
             loaded_saved_signals = load_saved_signals_file(output_csv_path, symbol, input_df=df)
@@ -2687,13 +2707,14 @@ def main() -> None:
 
             st.markdown("**Update Data**")
             if st.button("Update Data", use_container_width=True, key="update-trade-data"):
-                level, message = update_trade_data_in_google_drive(
+                level, message, manual_download = update_trade_data_in_google_drive(
                     drive_status=drive_status,
                     symbol=symbol,
                     trade_data_bytes=trade_download_bytes,
                 )
                 st.session_state.output_update_feedback_level = level
                 st.session_state.output_update_feedback_message = message
+                st.session_state.output_update_manual_download = manual_download
                 if level == "success":
                     st.session_state.drive_output_sync_completed = False
                     list_google_drive_folder_files.clear()
@@ -2706,6 +2727,19 @@ def main() -> None:
                     "error": st.error,
                 }.get(output_feedback_level, st.info)
                 feedback_fn(output_feedback_message)
+            output_manual_download = st.session_state.get("output_update_manual_download")
+            if isinstance(output_manual_download, dict):
+                file_name = str(output_manual_download.get("file_name") or f"{symbol}.csv")
+                file_bytes = output_manual_download.get("data") or b""
+                mime_type = str(output_manual_download.get("mime") or "text/csv")
+                st.download_button(
+                    f"Download {file_name}",
+                    data=file_bytes,
+                    file_name=file_name,
+                    mime=mime_type,
+                    use_container_width=True,
+                    key=f"download-missing-output-{file_name}",
+                )
 
 if __name__ == "__main__":
     main()
