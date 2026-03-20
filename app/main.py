@@ -1858,6 +1858,7 @@ def main() -> None:
     st.session_state.setdefault("filter_data_dir", None)
     st.session_state.setdefault("filter_output_dir", None)
     st.session_state.setdefault("selected_symbol", None)
+    st.session_state.setdefault("selected_symbol_restore", None)
     st.session_state.setdefault("cloud_workspace_session_id", str(uuid4()))
     st.session_state.setdefault("show_drive_process_dialog", False)
     st.session_state.setdefault("drive_process_choice_widget", "No")
@@ -2218,6 +2219,10 @@ def main() -> None:
         return
 
     symbol_names = list(symbols.keys())
+    requested_symbol_restore = st.session_state.get("selected_symbol_restore")
+    if requested_symbol_restore in symbol_names:
+        st.session_state.selected_symbol = requested_symbol_restore
+    st.session_state.selected_symbol_restore = None
     if st.session_state.selected_symbol not in symbol_names:
         st.session_state.selected_symbol = symbol_names[0]
 
@@ -2589,6 +2594,7 @@ def main() -> None:
                 st.session_state.output_reload_feedback_level = reload_level
                 st.session_state.output_reload_feedback_message = reload_message
                 if persisted_saved_signals is not None:
+                    st.session_state.selected_symbol_restore = symbol
                     apply_saved_signals_state(persisted_saved_signals, symbol, output_csv_path)
                     st.session_state.confirm_clear_all = False
                     st.rerun()
