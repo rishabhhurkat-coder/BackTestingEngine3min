@@ -2027,7 +2027,6 @@ def main() -> None:
             st.caption("Session: 09:15 - 15:27")
             st.markdown("**Google Drive**")
             if drive_status.connected:
-                st.success(drive_status.message)
                 if drive_raw_files_error:
                     st.warning(f"Could not read Drive raw files: {drive_raw_files_error}")
                 elif drive_raw_files:
@@ -2073,31 +2072,6 @@ def main() -> None:
                     st.session_state.drive_input_sync_file_count = file_count
                     st.session_state.selected_symbol = None
                     list_google_drive_folder_files.clear()
-                    list_symbols.clear()
-                    load_data.clear()
-                    st.rerun()
-                has_processed_input_files = folder_has_supported_data_files(input_dir)
-                if has_processed_input_files:
-                    st.success("Files are ready for this browser session.")
-
-                if st.button("Upload Files", use_container_width=True):
-                    st.session_state.show_upload_dialog = True
-                    st.rerun()
-
-                if st.button("Reset Uploaded Files", use_container_width=True):
-                    clear_supported_data_files(raw_dir)
-                    clear_supported_data_files(input_dir)
-                    clear_supported_data_files(output_dir)
-                    st.session_state.cloud_raw_upload_signature = ()
-                    st.session_state.cloud_uploader_nonce += 1
-                    st.session_state.cloud_input_uploader_nonce += 1
-                    st.session_state.cloud_output_uploader_nonce += 1
-                    st.session_state.drive_dialog_feedback_level = None
-                    st.session_state.drive_dialog_feedback_message = ""
-                    st.session_state.drive_input_sync_choice = None
-                    st.session_state.drive_input_sync_file_count = 0
-                    st.session_state.drive_manual_input_downloads = []
-                    st.session_state.selected_symbol = None
                     list_symbols.clear()
                     load_data.clear()
                     st.rerun()
