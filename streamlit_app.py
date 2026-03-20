@@ -1376,8 +1376,10 @@ def build_saved_signals_trade_table(
                 "Price",
                 "Entry Date",
                 "Entry Time",
+                "Entry Price",
                 "Exit Date",
                 "Exit Time",
+                "Exit Price",
                 "Qty",
                 "PL Points",
                 "PL Amt",
@@ -1399,8 +1401,10 @@ def build_saved_signals_trade_table(
                 "Price",
                 "Entry Date",
                 "Entry Time",
+                "Entry Price",
                 "Exit Date",
                 "Exit Time",
+                "Exit Price",
                 "Qty",
                 "PL Points",
                 "PL Amt",
@@ -1419,6 +1423,7 @@ def build_saved_signals_trade_table(
 
         exit_date = ""
         exit_time = ""
+        exit_price: float | None = None
         pl_points: float | None = None
         pl_amt: float | None = None
 
@@ -1442,8 +1447,10 @@ def build_saved_signals_trade_table(
                 "Price": price,
                 "Entry Date": str(row["Date"]),
                 "Entry Time": str(row["Time"]),
+                "Entry Price": price,
                 "Exit Date": exit_date,
                 "Exit Time": exit_time,
+                "Exit Price": exit_price,
                 "Qty": qty,
                 "PL Points": pl_points,
                 "PL Amt": pl_amt,
@@ -1543,6 +1550,8 @@ def style_saved_signals_table(
         .format(
             {
                 "Price": fmt_money,
+                "Entry Price": fmt_money,
+                "Exit Price": fmt_money,
                 "PL Points": fmt_money,
                 "PL Amt": fmt_money,
                 "Qty": fmt_qty,
@@ -2165,8 +2174,10 @@ def main() -> None:
                         "Price",
                         "Entry Date",
                         "Entry Time",
+                        "Entry Price",
                         "Exit Date",
                         "Exit Time",
+                        "Exit Price",
                         "Qty",
                         "PL Points",
                         "PL Amt",
