@@ -573,7 +573,7 @@ const Chart = ({
         vertLine: {
           visible: true,
           width: 1,
-          style: LineStyle.Solid,
+          style: LineStyle.Dashed,
           color: "rgba(15, 23, 42, 0.45)",
           labelVisible: true,
           labelBackgroundColor: "#111827",
@@ -581,7 +581,7 @@ const Chart = ({
         horzLine: {
           visible: true,
           width: 1,
-          style: LineStyle.Solid,
+          style: LineStyle.Dashed,
           color: "rgba(15, 23, 42, 0.45)",
           labelVisible: true,
           labelBackgroundColor: "#111827",
