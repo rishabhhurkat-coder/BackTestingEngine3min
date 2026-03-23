@@ -742,13 +742,13 @@ def render_drive_process_dialog(
                 data=file_bytes,
                 file_name=file_name,
                 mime=mime_type,
-                use_container_width=True,
+                width="stretch",
                 key=f"drive-dialog-download-{file_name}",
             )
 
     process_col, cancel_col = st.columns(2, gap="small")
     with process_col:
-        if st.button("Process Selected Drive Scrips", use_container_width=True):
+        if st.button("Process Selected Drive Scrips", width="stretch"):
             _, input_dir, output_dir = ensure_workspace_dirs(main_dir)
             try:
                 level, message, manual_downloads = process_selected_drive_raw_symbols(
@@ -771,7 +771,7 @@ def render_drive_process_dialog(
             load_data.clear()
             st.rerun()
     with cancel_col:
-        if st.button("Cancel", use_container_width=True):
+        if st.button("Cancel", width="stretch"):
             st.session_state.drive_dialog_feedback_level = None
             st.session_state.drive_dialog_feedback_message = ""
             st.session_state.drive_manual_input_downloads = []
@@ -1774,6 +1774,23 @@ def _table_height_for_rows(row_count: int, min_height: int = 180) -> int:
     return min(CHART_HEIGHT, height)
 
 
+def _concat_non_empty_frames(frames: list[pd.DataFrame], *, fallback_columns: list[str] | None = None) -> pd.DataFrame:
+    cleaned_frames: list[pd.DataFrame] = []
+    for frame in frames:
+        if frame is None or frame.empty:
+            continue
+        cleaned = frame.dropna(axis=1, how="all").copy()
+        if cleaned.empty:
+            continue
+        cleaned_frames.append(cleaned)
+    if not cleaned_frames:
+        return pd.DataFrame(columns=fallback_columns or [])
+    result = pd.concat(cleaned_frames, ignore_index=True)
+    if fallback_columns is not None:
+        result = result.reindex(columns=fallback_columns)
+    return result
+
+
 def _load_output_dashboard_rows(output_dir: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for file_path in list_supported_data_files(output_dir):
@@ -1794,7 +1811,7 @@ def _load_output_dashboard_rows(output_dir: Path) -> pd.DataFrame:
         frames.append(safe_df)
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+    return _concat_non_empty_frames(frames)
 
 
 def build_output_dashboard_summary(output_dir: Path) -> tuple[dict[str, Any], pd.DataFrame]:
@@ -2044,7 +2061,7 @@ def load_dashboard_trade_rows(
             frames.append(normalized_df)
     if not frames:
         return empty_dashboard_trade_df().copy()
-    return pd.concat(frames, ignore_index=True)
+    return _concat_non_empty_frames(frames, fallback_columns=list(empty_dashboard_trade_df().columns))
 
 
 def filter_dashboard_trade_rows(
@@ -2210,7 +2227,7 @@ def render_dashboard_section_header(
                 data=download_data,
                 file_name=download_filename,
                 mime=download_mime,
-                use_container_width=True,
+                width="stretch",
                 key=download_key,
             )
 
@@ -3142,7 +3159,7 @@ def render_detailed_charts_panel(title: str, chart_specs: list[tuple[str, Any]])
                 if fig is None:
                     st.info("No data available")
                 else:
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
 
 def build_strategy_comparison_dashboard(
@@ -3364,7 +3381,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                     if fig is None:
                         cell.info("No data available")
                     else:
-                        cell.plotly_chart(fig, use_container_width=True)
+                        cell.plotly_chart(fig, width="stretch")
 
         with st.container():
             st.markdown("### Strategy Comparison")
@@ -3391,7 +3408,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             )
             st.dataframe(
                 style_dashboard_table(comparison_display_df),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=min(CHART_HEIGHT, 420),
             )
@@ -3477,13 +3494,13 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             if fig is None:
                 st.info("No data available")
             else:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
     with st.container():
         st.markdown("### Per-Scrip Summary")
         st.dataframe(
             style_dashboard_table(summary_display_df),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(CHART_HEIGHT, 520),
             column_config=build_dashboard_summary_column_config(),
@@ -3525,7 +3542,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         detail_display_df = drilldown_df.loc[:, detail_columns].rename(columns={"PL Amt": "Profit / Loss"})
         st.dataframe(
             style_dashboard_table(detail_display_df),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             height=min(CHART_HEIGHT, 420),
         )
@@ -3848,7 +3865,7 @@ def main() -> None:
             else:
                 st.info(drive_status.message)
             if is_windows:
-                if st.button("Main Folder", use_container_width=True):
+                if st.button("Main Folder", width="stretch"):
                     selected_folder = browse_for_folder(st.session_state.main_dir_path_input)
                     if selected_folder:
                         selected_main_dir = resolve_main_workspace_dir(selected_folder)
@@ -3896,7 +3913,7 @@ def main() -> None:
                         st.rerun()
 
             if is_windows:
-                if st.button("Process Input Files", use_container_width=True):
+                if st.button("Process Input Files", width="stretch"):
                     selected_main_raw = str(st.session_state.get("main_dir_path_input") or "").strip()
                     if not selected_main_raw:
                         st.session_state.process_feedback_level = "error"
@@ -4120,7 +4137,7 @@ def main() -> None:
                 key="filter_to_date",
             )
             st.markdown("<div style='height: 1.2rem;'></div>", unsafe_allow_html=True)
-            if st.button("See Dashboard", use_container_width=True, key="open-output-dashboard"):
+            if st.button("See Dashboard", width="stretch", key="open-output-dashboard"):
                 render_output_dashboard_dialog(output_dir)
     else:
         from_date = st.date_input(
@@ -4184,13 +4201,13 @@ def main() -> None:
         with btn_mid:
             next_month_clicked = st.button(
                 "Next Month",
-                use_container_width=True,
+                width="stretch",
                 key="header-next-month",
             )
         with btn_right:
             trades_clicked = st.button(
                 "Trades",
-                use_container_width=True,
+                width="stretch",
                 key="header-trades-toggle",
             )
         if next_month_clicked and next_from_date < navigation_limit_date and next_to_date > next_from_date:
@@ -4383,7 +4400,7 @@ def main() -> None:
                 st.caption("Click a candle to automatically create BUY or SELL signal.")
 
             st.markdown("**Reload Data**")
-            if st.button("Reload Data", use_container_width=True, key="reload-output-data"):
+            if st.button("Reload Data", width="stretch", key="reload-output-data"):
                 try:
                     reload_level, reload_message, persisted_saved_signals = reload_selected_drive_output_for_symbol(
                         drive_status=drive_status,
@@ -4413,7 +4430,7 @@ def main() -> None:
                 reload_feedback_fn(reload_feedback_message)
 
             st.markdown("**Update Data**")
-            if st.button("Update Data", use_container_width=True, key="update-trade-data"):
+            if st.button("Update Data", width="stretch", key="update-trade-data"):
                 level, message, manual_download = update_trade_data_in_google_drive(
                     drive_status=drive_status,
                     symbol=symbol,
@@ -4444,7 +4461,7 @@ def main() -> None:
                     data=file_bytes,
                     file_name=file_name,
                     mime=mime_type,
-                    use_container_width=True,
+                    width="stretch",
                     key=f"download-missing-output-{file_name}",
                 )
 
