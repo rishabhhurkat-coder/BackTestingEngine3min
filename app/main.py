@@ -2771,7 +2771,10 @@ def apply_dashboard_cost_model(
     capital = max(float(avg_value_traded_per_lot or 0.0), 0.0) * 0.25 * 0.20 * scrip_count
     leverage_value = max(float(leverage or 0.0), 0.0)
     interest_rate_value = max(float(interest_rate_pct or 0.0), 0.0)
-    monthly_interest_total = capital * leverage_value * (interest_rate_value / 100.0) * scrip_count if prop_dashboard_enabled else 0.0
+    monthly_interest_total = (
+        max(float(avg_value_traded_per_lot or 0.0), 0.0) * scrip_count * 0.25 * ((interest_rate_value / 100.0) / 12.0)
+        if prop_dashboard_enabled else 0.0
+    )
 
     if adjusted_df.empty:
         return adjusted_df, {
@@ -2798,7 +2801,7 @@ def apply_dashboard_cost_model(
     total_pl_amt = float(pd.to_numeric(adjusted_df.get("PL Amt"), errors="coerce").fillna(0).sum())
     interest_months = pd.to_datetime(adjusted_df.loc[closed_mask, "Entry Timestamp"], errors="coerce").dt.to_period("M").dropna().astype(str).unique().tolist()
     total_interest_deducted = monthly_interest_total * len(interest_months) if prop_dashboard_enabled else 0.0
-    roi_base = capital * leverage_value
+    roi_base = capital
     roi_pct = ((total_pl_amt - total_interest_deducted) / roi_base * 100.0) if prop_dashboard_enabled and roi_base > 0 else 0.0
 
     return adjusted_df, {
@@ -3653,6 +3656,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                     step=50000.0,
                     key="dashboard_prop_avg_value_traded",
                 )
+                st.caption(f"Display Value: {format_inr(avg_value_traded_per_lot)}")
                 leverage = st.number_input(
                     "Leverage",
                     min_value=0.0,
@@ -3668,9 +3672,11 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                     key="dashboard_prop_interest_rate",
                 )
                 capital_preview = avg_value_traded_per_lot * 0.25 * 0.20 * len(selected_dashboard_scrips)
+                monthly_interest_preview = avg_value_traded_per_lot * len(selected_dashboard_scrips) * 0.25 * ((interest_rate_pct / 100.0) / 12.0)
                 st.metric("Capital", format_inr(capital_preview))
+                st.metric("Interest / Month", format_inr(monthly_interest_preview))
                 st.caption("Capital = Value Traded x 25% x 20% x No. of Scrips")
-                st.caption("Monthly Interest = Capital x Leverage x Interest Rate x No. of Scrips")
+                st.caption("Interest / Month = No. of Scrips x Value Traded x 25% x (Interest Rate / 12)")
             else:
                 st.caption("Current mode deducts only the estimated charges per trade.")
     filters_text = (
