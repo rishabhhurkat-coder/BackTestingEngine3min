@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import html
 import shutil
 import subprocess
 import sys
@@ -2122,6 +2123,60 @@ def format_inr(value: Any) -> str:
     return f"{sign}₹ {formatted}"
 
 
+def format_inr_compact(value: Any) -> str:
+    if pd.isna(value):
+        return "₹ 0"
+    value = float(value)
+    sign = "-" if value < 0 else ""
+    value = abs(value)
+
+    def _format_number(number: float, *, decimals: int = 1) -> str:
+        text = f"{number:.{decimals}f}"
+        return text.rstrip("0").rstrip(".")
+
+    if value >= 1e7:
+        return f"{sign}₹ {_format_number(value / 1e7)} Cr"
+    if value >= 1e5:
+        lakh_value = value / 1e5
+        decimals = 0 if lakh_value >= 10 else 1
+        return f"{sign}₹ {_format_number(lakh_value, decimals=decimals)} Lacs"
+    if value >= 1e3:
+        return f"{sign}₹ {_format_number(value / 1e3)} K"
+    return f"{sign}₹ {int(round(value))}"
+
+
+def build_kpi_snapshot_svg(title: str, cards: list[dict[str, str]]) -> bytes:
+    columns = 3
+    card_width = 320
+    card_height = 120
+    gap = 18
+    rows = max(1, (len(cards) + columns - 1) // columns)
+    width = (card_width * columns) + (gap * (columns - 1)) + 60
+    height = (card_height * rows) + (gap * (rows - 1)) + 110
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="#f8fafc" rx="18" ry="18"/>',
+        f'<text x="30" y="42" font-family="Segoe UI, Arial, sans-serif" font-size="28" font-weight="700" fill="#0f172a">{html.escape(title)}</text>',
+    ]
+    for index, card in enumerate(cards):
+        row = index // columns
+        col = index % columns
+        x = 30 + col * (card_width + gap)
+        y = 64 + row * (card_height + gap)
+        card_label = html.escape(card["label"])
+        card_value = html.escape(card["value"])
+        card_color = html.escape(card["color"])
+        svg_parts.extend(
+            [
+                f'<rect x="{x}" y="{y}" width="{card_width}" height="{card_height}" rx="18" ry="18" fill="#ffffff" stroke="#dbe3ef" stroke-width="1.5"/>',
+                f'<text x="{x + 18}" y="{y + 32}" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="600" fill="#64748b">{card_label}</text>',
+                f'<text x="{x + 18}" y="{y + 84}" font-family="Segoe UI, Arial, sans-serif" font-size="34" font-weight="700" fill="{card_color}">{card_value}</text>',
+            ]
+        )
+    svg_parts.append("</svg>")
+    return "".join(svg_parts).encode("utf-8")
+
+
 def _normalize_dashboard_score_series(series: pd.Series, *, inverse: bool = False) -> pd.Series:
     numeric = pd.to_numeric(series, errors="coerce").fillna(0.0).astype(float)
     if numeric.empty:
@@ -2300,13 +2355,21 @@ def style_dashboard_table(table_df: pd.DataFrame) -> pd.io.formats.style.Styler:
     )
 
 
-def render_dashboard_metric(cell, label: str, value: Any, delta_value: float | None = None, *, percent: bool = False) -> None:
+def render_dashboard_metric(
+    cell,
+    label: str,
+    value: Any,
+    delta_value: float | None = None,
+    *,
+    percent: bool = False,
+    compact_currency: bool = False,
+    accent_color: str | None = None,
+) -> dict[str, str]:
     numeric_value: float | None = None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         numeric_value = float(value)
-    if percent and numeric_value is not None:
-        display_value = f"{numeric_value:.2f}%"
-    elif label in {
+
+    currency_labels = {
         "Total PL Amount",
         "Total Profit / Loss",
         "Avg Profit Per Trade",
@@ -2314,8 +2377,12 @@ def render_dashboard_metric(cell, label: str, value: Any, delta_value: float | N
         "Avg Net Profit Per Trade",
         "Max Drawdown",
         "Total PL",
-    } and numeric_value is not None:
-        display_value = format_inr(numeric_value)
+    }
+
+    if percent and numeric_value is not None:
+        display_value = f"{numeric_value:.2f}%"
+    elif label in currency_labels and numeric_value is not None:
+        display_value = format_inr_compact(numeric_value) if compact_currency else format_inr(numeric_value)
     elif isinstance(value, int):
         display_value = f"{value}"
     elif isinstance(value, float):
@@ -2323,38 +2390,54 @@ def render_dashboard_metric(cell, label: str, value: Any, delta_value: float | N
     else:
         display_value = str(value)
 
-    if numeric_value is not None and numeric_value < 0 and not percent:
-        cell.markdown(
-            f"""
-            <div style="padding:0.5rem 0.25rem 0.2rem 0.25rem;">
-                <div style="font-size:0.95rem;color:#6b7280;margin-bottom:0.25rem;">{label}</div>
-                <div style="font-size:1.6rem;font-weight:700;color:#b91c1c;line-height:1.1;">{display_value}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
+    value_color = accent_color or "#0f172a"
+    if numeric_value is not None and numeric_value < 0:
+        value_color = "#b91c1c"
+
+    font_size = "1.35rem" if compact_currency else "1.95rem"
+    min_height = "118px" if compact_currency else "112px"
+    border_color = "#fecaca" if value_color == "#b91c1c" else "#dbe3ef"
+    background_color = "#fef2f2" if value_color == "#b91c1c" else "#ffffff"
+    delta_html = ""
+    if delta_value is not None and numeric_value is not None and not accent_color:
+        delta_numeric = float(delta_value)
+        if percent:
+            delta_text = f"{delta_numeric:+.2f}%"
+        elif label in currency_labels:
+            delta_text = format_inr(abs(delta_numeric))
+            delta_text = f"+{delta_text}" if delta_numeric > 0 else f"-{delta_text}"
+        else:
+            delta_text = f"{delta_numeric:+.2f}"
+        delta_color = "#15803d" if delta_numeric >= 0 else "#b91c1c"
+        delta_bg = "rgba(21,128,61,0.10)" if delta_numeric >= 0 else "rgba(185,28,28,0.10)"
+        delta_html = (
+            f'<div style="display:inline-block;margin-top:0.55rem;padding:0.16rem 0.55rem;'
+            f'border-radius:999px;background:{delta_bg};color:{delta_color};font-size:0.82rem;font-weight:600;">'
+            f'{html.escape(delta_text)}</div>'
         )
-        return
 
-    if delta_value is None:
-        cell.metric(label, display_value)
-        return
-
-    delta_numeric = float(delta_value)
-    if label in {
-        "Total PL Amount",
-        "Total Profit / Loss",
-        "Avg Profit Per Trade",
-        "Avg Loss Per Trade",
-        "Avg Net Profit Per Trade",
-        "Max Drawdown",
-        "Total PL",
-    } and not percent:
-        delta_text = format_inr(delta_numeric)
-        if delta_numeric > 0:
-            delta_text = f"+{delta_text}"
-    else:
-        delta_text = f"{delta_numeric:+.2f}% " if percent else f"{delta_numeric:+.2f}"
-    cell.metric(label, display_value, delta=delta_text.strip(), delta_color="normal")
+    cell.markdown(
+        f"""
+        <div style="
+            min-height:{min_height};
+            padding:0.85rem 0.9rem 0.8rem 0.9rem;
+            border:1px solid {border_color};
+            border-radius:18px;
+            background:{background_color};
+            box-sizing:border-box;
+        ">
+            <div style="font-size:0.95rem;color:#64748b;font-weight:600;line-height:1.2;min-height:2.2rem;">
+                {html.escape(label)}
+            </div>
+            <div style="font-size:{font_size};font-weight:700;color:{value_color};line-height:1.08;letter-spacing:-0.01em;word-break:break-word;">
+                {html.escape(display_value)}
+            </div>
+            {delta_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    return {"label": label, "value": display_value, "color": value_color}
 
 
 def build_strategy_comparison_dashboard(
@@ -2512,12 +2595,22 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 "loss_trades": int(pd.to_numeric(comparison_df["Total Loss Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
             }
             metric_cols = st.columns(6)
-            render_dashboard_metric(metric_cols[0], "Strategies", comparison_metrics["total_scrips"])
-            render_dashboard_metric(metric_cols[1], "Total Trades", comparison_metrics["total_trades"])
-            render_dashboard_metric(metric_cols[2], "Total PL Amount", comparison_metrics["total_pl_amt"], comparison_metrics["total_pl_amt"])
-            render_dashboard_metric(metric_cols[3], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True)
-            render_dashboard_metric(metric_cols[4], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], comparison_metrics["sharpe_ratio"])
-            render_dashboard_metric(metric_cols[5], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"])
+            comparison_kpi_cards = [
+                render_dashboard_metric(metric_cols[0], "Strategies", comparison_metrics["total_scrips"]),
+                render_dashboard_metric(metric_cols[1], "Total Trades", comparison_metrics["total_trades"]),
+                render_dashboard_metric(metric_cols[2], "Total PL Amount", comparison_metrics["total_pl_amt"], comparison_metrics["total_pl_amt"], compact_currency=True),
+                render_dashboard_metric(metric_cols[3], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True),
+                render_dashboard_metric(metric_cols[4], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], comparison_metrics["sharpe_ratio"]),
+                render_dashboard_metric(metric_cols[5], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"], compact_currency=True),
+            ]
+            st.download_button(
+                "Download KPI Overview Image",
+                data=build_kpi_snapshot_svg("KPI Overview", comparison_kpi_cards),
+                file_name="kpi_overview.svg",
+                mime="image/svg+xml",
+                use_container_width=False,
+                key="download-dashboard-kpi-strategy",
+            )
 
         with st.container():
             st.markdown("### Advanced Metrics")
@@ -2531,9 +2624,9 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             render_dashboard_metric(advanced_row_2[2], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True)
             advanced_row_3 = st.columns(3)
             render_dashboard_metric(advanced_row_3[0], "Risk Reward Ratio", comparison_metrics["risk_reward_ratio"], comparison_metrics["risk_reward_ratio"])
-            render_dashboard_metric(advanced_row_3[1], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"])
+            render_dashboard_metric(advanced_row_3[1], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"], compact_currency=True)
             best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
-            render_dashboard_metric(advanced_row_3[2], "DD Date", best_dd_date)
+            render_dashboard_metric(advanced_row_3[2], "DD Date", best_dd_date, accent_color="#b91c1c")
 
         st.markdown("---")
 
@@ -2654,12 +2747,22 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     with st.container():
         st.markdown("### KPI Overview")
         metric_cols = st.columns(6)
-        render_dashboard_metric(metric_cols[0], "Total Scrips", metrics["total_scrips"])
-        render_dashboard_metric(metric_cols[1], "Total Trades", metrics["total_trades"])
-        render_dashboard_metric(metric_cols[2], "Total PL Amount", metrics["total_pl_amt"], metrics["total_pl_amt"])
-        render_dashboard_metric(metric_cols[3], "Win Rate %", metrics["win_rate"], metrics["win_rate"], percent=True)
-        render_dashboard_metric(metric_cols[4], "Sharpe Ratio", metrics["sharpe_ratio"], metrics["sharpe_ratio"])
-        render_dashboard_metric(metric_cols[5], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"])
+        kpi_cards = [
+            render_dashboard_metric(metric_cols[0], "Total Scrips", metrics["total_scrips"]),
+            render_dashboard_metric(metric_cols[1], "Total Trades", metrics["total_trades"]),
+            render_dashboard_metric(metric_cols[2], "Total PL Amount", metrics["total_pl_amt"], metrics["total_pl_amt"], compact_currency=True),
+            render_dashboard_metric(metric_cols[3], "Win Rate %", metrics["win_rate"], metrics["win_rate"], percent=True),
+            render_dashboard_metric(metric_cols[4], "Sharpe Ratio", metrics["sharpe_ratio"], metrics["sharpe_ratio"]),
+            render_dashboard_metric(metric_cols[5], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"], compact_currency=True),
+        ]
+        st.download_button(
+            "Download KPI Overview Image",
+            data=build_kpi_snapshot_svg("KPI Overview", kpi_cards),
+            file_name="kpi_overview.svg",
+            mime="image/svg+xml",
+            use_container_width=False,
+            key="download-dashboard-kpi-single",
+        )
 
     with st.container():
         st.markdown("### Advanced Metrics")
@@ -2673,8 +2776,8 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         render_dashboard_metric(advanced_row_2[2], "Win Rate %", metrics["win_rate"], metrics["win_rate"], percent=True)
         advanced_row_3 = st.columns(3)
         render_dashboard_metric(advanced_row_3[0], "Risk Reward Ratio", metrics["risk_reward_ratio"], metrics["risk_reward_ratio"])
-        render_dashboard_metric(advanced_row_3[1], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"])
-        render_dashboard_metric(advanced_row_3[2], "DD Date", metrics["dd_date"])
+        render_dashboard_metric(advanced_row_3[1], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"], compact_currency=True)
+        render_dashboard_metric(advanced_row_3[2], "DD Date", metrics["dd_date"], accent_color="#b91c1c")
 
     st.markdown("---")
 
@@ -2726,8 +2829,8 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     with st.container():
         st.markdown("### Equity Drawdown")
         drawdown_col, dd_date_col, drawdown_chart_col = st.columns([1.0, 1.0, 4.0])
-        render_dashboard_metric(drawdown_col, "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"])
-        render_dashboard_metric(dd_date_col, "DD Date", metrics["dd_date"])
+        render_dashboard_metric(drawdown_col, "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"], compact_currency=True)
+        render_dashboard_metric(dd_date_col, "DD Date", metrics["dd_date"], accent_color="#b91c1c")
         if metrics["equity_df"].empty:
             drawdown_chart_col.info("No closed trades available for drawdown.")
         else:
