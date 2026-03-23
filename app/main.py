@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import html
+from io import BytesIO
 import shutil
 import subprocess
 import sys
@@ -14,6 +15,11 @@ from uuid import uuid4
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .component import tv_chart_component, build_dir
 from .data_pipeline import extract_symbol, process_raw_folder
@@ -2186,8 +2192,8 @@ def render_dashboard_section_header(
     *,
     download_data: bytes | None = None,
     download_filename: str | None = None,
-    download_label: str = "📥 Download Dashboard (CSV Summary)",
-    download_mime: str = "text/csv",
+    download_label: str = "📄 Download Dashboard Summary",
+    download_mime: str = "application/pdf",
     download_key: str | None = None,
 ) -> None:
     left_col, right_col = st.columns([7, 3])
@@ -2203,6 +2209,191 @@ def render_dashboard_section_header(
                 use_container_width=True,
                 key=download_key,
             )
+
+
+def _pdf_escape_text(value: Any) -> str:
+    if value is None:
+        return "-"
+    text = str(value).strip()
+    return html.escape(text or "-")
+
+
+def _format_dashboard_pdf_value(column: str, value: Any) -> str:
+    if pd.isna(value):
+        return "-"
+    if column in {
+        "Total PL", "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade",
+        "Max Drawdown", "PL Amt", "Total PL Amt", "Profit / Loss", "Total Profit / Loss",
+        "Entry Price", "Exit Price", "Price",
+    }:
+        return format_inr(float(value))
+    if column == "Win Rate %":
+        return f"{float(value):.2f}%"
+    if column in {"Sharpe Ratio", "Risk Reward Ratio", "Score"}:
+        return f"{float(value):.2f}"
+    if column in {"Rank", "Sr.No", "Qty", "Trades", "Closed Trades", "Open Trades", "Wins", "Losses", "Drawdown Duration", "Max DD Duration", "Total Profit Trades", "Total Loss Trades", "Total Trades"}:
+        return f"{int(float(value))}"
+    return str(value)
+
+
+def _build_dashboard_pdf_table(df: pd.DataFrame, columns: list[str], *, title: str) -> list[Any]:
+    styles = getSampleStyleSheet()
+    if df.empty:
+        return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", styles["Heading3"]), Paragraph("No data available", styles["BodyText"])]
+
+    safe_columns = [column for column in columns if column in df.columns]
+    if not safe_columns:
+        return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", styles["Heading3"]), Paragraph("No valid columns available", styles["BodyText"])]
+
+    header_style = ParagraphStyle(
+        "PdfHeader",
+        parent=styles["BodyText"],
+        fontName="Helvetica-Bold",
+        fontSize=8.5,
+        leading=10,
+        textColor=colors.white,
+    )
+    body_style = ParagraphStyle(
+        "PdfBody",
+        parent=styles["BodyText"],
+        fontSize=8,
+        leading=9.5,
+        textColor=colors.HexColor("#0f172a"),
+    )
+
+    rows: list[list[Any]] = [[Paragraph(_pdf_escape_text(column), header_style) for column in safe_columns]]
+    for _, row in df.loc[:, safe_columns].iterrows():
+        rows.append([
+            Paragraph(_pdf_escape_text(_format_dashboard_pdf_value(column, row[column])), body_style)
+            for column in safe_columns
+        ])
+
+    available_width = landscape(A4)[0] - (18 * mm * 2)
+    col_width = available_width / max(len(safe_columns), 1)
+    table = LongTable(rows, colWidths=[col_width] * len(safe_columns), repeatRows=1)
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0f172a")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
+                ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#d1d5db")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ]
+        )
+    )
+    return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", styles["Heading3"]), Spacer(1, 3 * mm), table]
+
+
+def build_dashboard_pdf_report(
+    *,
+    report_title: str,
+    output_dir: Path,
+    filters_text: str,
+    kpi_items: list[tuple[str, Any]],
+    advanced_items: list[tuple[str, Any]],
+    summary_df: pd.DataFrame,
+    detail_df: pd.DataFrame,
+    summary_columns: list[str],
+    detail_columns: list[str],
+    detail_title: str = "Detailed Data",
+) -> bytes:
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "PdfTitle",
+        parent=styles["Title"],
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor("#0f172a"),
+    )
+    meta_style = ParagraphStyle(
+        "PdfMeta",
+        parent=styles["BodyText"],
+        fontSize=8.5,
+        leading=10,
+        textColor=colors.HexColor("#475569"),
+    )
+    metric_style = ParagraphStyle(
+        "PdfMetric",
+        parent=styles["BodyText"],
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor("#0f172a"),
+    )
+
+    def metric_color(label: str, value: Any) -> str:
+        if label in {"Max Drawdown", "Avg Loss Per Trade", "DD Date", "Total Loss Trades"}:
+            return "#b91c1c"
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and float(value) > 0 and label in {
+            "Total PL", "Win Rate %", "Risk Reward Ratio", "Sharpe Ratio", "Avg Profit Per Trade", "Avg Net Profit Per Trade",
+        }:
+            return "#15803d"
+        return "#0f172a"
+
+    def build_metric_table(items: list[tuple[str, Any]]) -> Table:
+        cells: list[Any] = []
+        for title, value in items:
+            display = _format_dashboard_pdf_value(title, value)
+            color = metric_color(title, value)
+            markup = (
+                f"{_pdf_escape_text(title)}<br/>"
+                f"<font color=\"{color}\"><b>{_pdf_escape_text(display)}</b></font>"
+            )
+            cells.append(Paragraph(markup, metric_style))
+        row_size = 3
+        rows = [cells[index:index + row_size] for index in range(0, len(cells), row_size)]
+        if rows and len(rows[-1]) < row_size:
+            rows[-1].extend([""] * (row_size - len(rows[-1])))
+        table = Table(rows, colWidths=[(landscape(A4)[0] - (18 * mm * 2)) / row_size] * row_size)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#f8fafc")),
+                    ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#d1d5db")),
+                    ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#e2e8f0")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                    ("TOPPADDING", (0, 0), (-1, -1), 6),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ]
+            )
+        )
+        return table
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+    )
+    generated_at = pd.Timestamp.now().strftime("%d-%b-%Y %I:%M %p")
+    elements: list[Any] = [
+        Paragraph(_pdf_escape_text(report_title), title_style),
+        Spacer(1, 2 * mm),
+        Paragraph(f"Generated: {_pdf_escape_text(generated_at)}", meta_style),
+        Paragraph(f"Filters: {_pdf_escape_text(filters_text)}", meta_style),
+        Spacer(1, 4 * mm),
+        Paragraph("KPI Overview", styles["Heading2"]),
+        build_metric_table(kpi_items),
+        Spacer(1, 4 * mm),
+        Paragraph("Advanced Metrics", styles["Heading2"]),
+        build_metric_table(advanced_items),
+        Spacer(1, 4 * mm),
+    ]
+    elements.extend(_build_dashboard_pdf_table(summary_df, summary_columns, title="Summary"))
+    elements.append(Spacer(1, 4 * mm))
+    elements.extend(_build_dashboard_pdf_table(detail_df, detail_columns, title=detail_title))
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer.getvalue()
 
 
 def _normalize_dashboard_score_series(series: pd.Series, *, inverse: bool = False) -> pd.Series:
@@ -2703,100 +2894,6 @@ def render_detailed_charts_panel(title: str, chart_specs: list[tuple[str, Any]])
                     st.plotly_chart(fig, use_container_width=True)
 
 
-@st.dialog("cha Analyis", width="large")
-def render_chart_analysis_dialog(output_dir: Path) -> None:
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stDialog"] > div[role="dialog"] {
-            width: 96vw !important;
-            max-width: 96vw !important;
-        }
-        div[data-testid="stDialog"] section[tabindex="0"] {
-            max-height: 90vh !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    root_signature = dashboard_folder_signature(output_dir)
-    if not root_signature:
-        st.warning("No Output Files found")
-        return
-
-    root_df = load_dashboard_trade_rows(str(output_dir), root_signature, strategy_name="Current")
-    if root_df.empty:
-        st.info("No trade data available")
-        return
-
-    valid_entry_timestamps = root_df["Entry Timestamp"].dropna()
-    if valid_entry_timestamps.empty:
-        st.info("No valid trade data available")
-        return
-
-    min_entry_date = valid_entry_timestamps.min().date()
-    max_entry_date = valid_entry_timestamps.max().date()
-
-    filter_col_a, filter_col_b, filter_col_c = st.columns([1.1, 1.1, 0.9])
-    with filter_col_a:
-        chart_from_date = st.date_input(
-            "Entry Date From",
-            value=min_entry_date,
-            min_value=min_entry_date,
-            max_value=max_entry_date,
-            format="DD/MM/YYYY",
-            key="chart_analysis_from_date",
-        )
-    with filter_col_b:
-        chart_to_date = st.date_input(
-            "Entry Date To",
-            value=max_entry_date,
-            min_value=min_entry_date,
-            max_value=max_entry_date,
-            format="DD/MM/YYYY",
-            key="chart_analysis_to_date",
-        )
-    with filter_col_c:
-        include_open_trades = st.checkbox(
-            "Include Open Trades",
-            value=True,
-            key="chart_analysis_include_open",
-        )
-
-    if chart_from_date > chart_to_date:
-        st.warning("From date cannot be after To date.")
-        return
-
-    filtered_df = filter_dashboard_trade_rows(root_df, chart_from_date, chart_to_date, include_open_trades)
-    if filtered_df.empty:
-        st.warning("No data available")
-        return
-
-    metrics = build_dashboard_metrics(filtered_df)
-    summary_df = build_dashboard_summary_table(filtered_df)
-    _, chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
-    chart_names = [title for title, _ in chart_specs]
-    active_charts = st.multiselect(
-        "Activate / Deactivate Charts",
-        options=chart_names,
-        default=chart_names,
-        key="chart_analysis_active_charts",
-    )
-
-    if not active_charts:
-        st.info("Select at least one chart to display.")
-        return
-
-    for chart_title, fig in chart_specs:
-        if chart_title not in active_charts:
-            continue
-        st.markdown(f"### {chart_title}")
-        if fig is None:
-            st.info("No data available")
-        else:
-            st.plotly_chart(fig, use_container_width=True)
-
-
 def build_strategy_comparison_dashboard(
     output_dir: Path,
     start_date: Any,
@@ -2848,7 +2945,6 @@ def build_strategy_comparison_dashboard(
 
 def render_interactive_output_dashboard(output_dir: Path) -> None:
     st.markdown(CARD_STYLE, unsafe_allow_html=True)
-    st.caption(f"Interactive dashboard based on the current Output Files folder: {output_dir}")
     root_signature = dashboard_folder_signature(output_dir)
     strategy_dirs = dashboard_strategy_dirs(output_dir)
     strategy_mode_enabled = st.toggle(
@@ -2894,7 +2990,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Filters")
-        filter_col_a, filter_col_b, filter_col_c = st.columns([1.1, 1.1, 0.9])
+        filter_col_a, filter_col_b = st.columns([1.1, 1.1])
         with filter_col_a:
             filter_from_date = st.date_input(
                 "Entry Date From",
@@ -2913,15 +3009,11 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 format="DD/MM/YYYY",
                 key="dashboard_filter_to_date",
             )
-        with filter_col_c:
-            include_open_trades = st.checkbox(
-                "Include Open Trades",
-                value=True,
-                key="dashboard_include_open_trades",
-            )
+        include_open_trades = False
         if filter_from_date > filter_to_date:
             st.warning("From date cannot be after To date.")
             return
+    filters_text = f"Entry Date: {filter_from_date:%d-%b-%Y} to {filter_to_date:%d-%b-%Y} | Include Open Trades: No"
 
     if strategy_mode_enabled and strategy_dirs:
         comparison_df, strategy_equity_df = build_strategy_comparison_dashboard(
@@ -2949,13 +3041,41 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 "profit_trades": int(pd.to_numeric(comparison_df["Total Profit Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
                 "loss_trades": int(pd.to_numeric(comparison_df["Total Loss Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
             }
+            best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
             comparison_download_df = comparison_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
+            comparison_pdf = build_dashboard_pdf_report(
+                report_title="Dashboard Summary Report",
+                output_dir=output_dir,
+                filters_text=filters_text,
+                kpi_items=[
+                    ("Strategies", comparison_metrics["total_scrips"]),
+                    ("Total PL", comparison_metrics["total_pl_amt"]),
+                    ("Win Rate %", comparison_metrics["win_rate"]),
+                    ("Risk Reward Ratio", comparison_metrics["risk_reward_ratio"]),
+                    ("Max Drawdown", comparison_metrics["max_drawdown"]),
+                    ("DD Date", best_dd_date),
+                ],
+                advanced_items=[
+                    ("Avg Profit Per Trade", comparison_metrics["avg_profit_per_trade"]),
+                    ("Avg Loss Per Trade", comparison_metrics["avg_loss_per_trade"]),
+                    ("Avg Net Profit Per Trade", comparison_metrics["avg_net_profit_per_trade"]),
+                    ("Total Profit Trades", comparison_metrics["profit_trades"]),
+                    ("Total Loss Trades", comparison_metrics["loss_trades"]),
+                    ("Total Trades", comparison_metrics["total_trades"]),
+                    ("Sharpe Ratio", comparison_metrics["sharpe_ratio"]),
+                ],
+                summary_df=comparison_download_df,
+                detail_df=comparison_df,
+                summary_columns=["Strategy", "Rank", "Trades", "Win Rate %", "Total Profit / Loss", "Risk Reward Ratio", "Max Drawdown", "Score"],
+                detail_columns=["Strategy", "Rank", "Trades", "Total Profit Trades", "Total Loss Trades", "Win Rate %", "Total PL Amt", "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade", "Sharpe Ratio", "Max Drawdown", "Drawdown Duration", "Risk Reward Ratio", "DD Date", "Score"],
+                detail_title="Strategy Comparison Detail",
+            )
             render_dashboard_section_header(
                 "KPI Overview",
-                download_data=comparison_download_df.to_csv(index=False).encode("utf-8"),
-                download_filename="dashboard_summary.csv",
-                download_label="📥 Download Dashboard (CSV Summary)",
-                download_mime="text/csv",
+                download_data=comparison_pdf,
+                download_filename="dashboard_summary_report.pdf",
+                download_label="📄 Download Dashboard Summary",
+                download_mime="application/pdf",
                 download_key="dashboard-summary-strategy",
             )
             metric_row_1 = st.columns(3)
@@ -2965,7 +3085,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             metric_row_2 = st.columns(3)
             render_dashboard_box(metric_row_2[0], "Risk Reward Ratio", comparison_metrics["risk_reward_ratio"], force_green=comparison_metrics["risk_reward_ratio"] > 0)
             render_dashboard_box(metric_row_2[1], "Max Drawdown", comparison_metrics["max_drawdown"], force_red=True)
-            best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
             render_dashboard_box(metric_row_2[2], "DD Date", best_dd_date, force_red=True)
 
         with st.container():
@@ -3035,12 +3154,40 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         summary_display_df = summary_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
+        detail_display_df = filtered_df.rename(columns={"PL Amt": "Profit / Loss"})
+        summary_pdf = build_dashboard_pdf_report(
+            report_title="Dashboard Summary Report",
+            output_dir=output_dir,
+            filters_text=filters_text,
+            kpi_items=[
+                ("Total Scrips", metrics["total_scrips"]),
+                ("Total PL", metrics["total_pl_amt"]),
+                ("Win Rate %", metrics["win_rate"]),
+                ("Risk Reward Ratio", metrics["risk_reward_ratio"]),
+                ("Max Drawdown", metrics["max_drawdown"]),
+                ("DD Date", metrics["dd_date"]),
+            ],
+            advanced_items=[
+                ("Avg Profit Per Trade", metrics["avg_profit_per_trade"]),
+                ("Avg Loss Per Trade", metrics["avg_loss_per_trade"]),
+                ("Avg Net Profit Per Trade", metrics["avg_net_profit_per_trade"]),
+                ("Total Profit Trades", metrics["wins"]),
+                ("Total Loss Trades", metrics["losses"]),
+                ("Total Trades", metrics["total_trades"]),
+                ("Sharpe Ratio", metrics["sharpe_ratio"]),
+            ],
+            summary_df=summary_display_df,
+            detail_df=detail_display_df,
+            summary_columns=["Scrip", "Trades", "Closed Trades", "Open Trades", "Wins", "Losses", "Win Rate %", "Total Profit / Loss"],
+            detail_columns=["Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade", "Entry Price", "Exit Date", "Exit Time", "Exit Price", "Qty", "Profit / Loss", "Candle Analysis"],
+            detail_title="Trade Detail",
+        )
         render_dashboard_section_header(
             "KPI Overview",
-            download_data=summary_display_df.to_csv(index=False).encode("utf-8"),
-            download_filename="dashboard_summary.csv",
-            download_label="📥 Download Dashboard (CSV Summary)",
-            download_mime="text/csv",
+            download_data=summary_pdf,
+            download_filename="dashboard_summary_report.pdf",
+            download_label="📄 Download Dashboard Summary",
+            download_mime="application/pdf",
             download_key="dashboard-summary-single",
         )
         metric_row_1 = st.columns(3)
@@ -3719,8 +3866,6 @@ def main() -> None:
             st.markdown("<div style='height: 1.2rem;'></div>", unsafe_allow_html=True)
             if st.button("See Dashboard", use_container_width=True, key="open-output-dashboard"):
                 render_output_dashboard_dialog(output_dir)
-            if st.button("cha Analyis", use_container_width=True, key="open-chart-analysis"):
-                render_chart_analysis_dialog(output_dir)
     else:
         from_date = st.date_input(
             "From Date",
