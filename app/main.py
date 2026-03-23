@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 import tempfile
 from typing import Any
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 import pandas as pd
 import plotly.express as px
+import plotly.io as pio
 import streamlit as st
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -21,7 +23,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .component import tv_chart_component, build_dir
 from .data_pipeline import extract_symbol, process_raw_folder
@@ -2216,6 +2218,8 @@ def render_dashboard_section_header(
 def get_dashboard_pdf_fonts() -> tuple[str, str]:
     regular_name = "Helvetica"
     bold_name = "Helvetica-Bold"
+    font_cache_dir = Path(tempfile.gettempdir()) / "ema_trade_viewer_fonts"
+    font_cache_dir.mkdir(parents=True, exist_ok=True)
     font_candidates = [
         (
             "DashboardUnicode",
@@ -2242,6 +2246,14 @@ def get_dashboard_pdf_fonts() -> tuple[str, str]:
             Path("C:/Windows/Fonts/segoeuib.ttf"),
         ),
     ]
+    remote_fallbacks = [
+        (
+            "DashboardUnicode",
+            "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Regular.ttf",
+            "DashboardUnicode-Bold",
+            "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSans/NotoSans-Bold.ttf",
+        ),
+    ]
 
     for reg_name, reg_path, bold_reg_name, bold_path in font_candidates:
         try:
@@ -2256,6 +2268,24 @@ def get_dashboard_pdf_fonts() -> tuple[str, str]:
             break
         except Exception:
             continue
+    else:
+        for reg_name, reg_url, bold_reg_name, bold_url in remote_fallbacks:
+            reg_path = font_cache_dir / Path(reg_url).name
+            bold_path = font_cache_dir / Path(bold_url).name
+            try:
+                if not reg_path.exists():
+                    urllib.request.urlretrieve(reg_url, reg_path)
+                if not bold_path.exists():
+                    urllib.request.urlretrieve(bold_url, bold_path)
+                if reg_name not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont(reg_name, str(reg_path)))
+                if bold_reg_name not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont(bold_reg_name, str(bold_path)))
+                regular_name = reg_name
+                bold_name = bold_reg_name
+                break
+            except Exception:
+                continue
     return regular_name, bold_name
 
 
@@ -2291,6 +2321,7 @@ def _build_dashboard_pdf_table(
     title: str,
     regular_font: str,
     bold_font: str,
+    roomy: bool = False,
 ) -> list[Any]:
     styles = getSampleStyleSheet()
     if df.empty:
@@ -2304,20 +2335,22 @@ def _build_dashboard_pdf_table(
         empty_body = ParagraphStyle("PdfMissingBody", parent=styles["BodyText"], fontName=regular_font)
         return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", empty_heading), Paragraph("No valid columns available", empty_body)]
 
+    header_font_size = 9 if roomy else 8.5
+    body_font_size = 8.6 if roomy else 8
     header_style = ParagraphStyle(
         "PdfHeader",
         parent=styles["BodyText"],
         fontName=bold_font,
-        fontSize=8.5,
-        leading=10,
+        fontSize=header_font_size,
+        leading=header_font_size + 2,
         textColor=colors.white,
     )
     body_style = ParagraphStyle(
         "PdfBody",
         parent=styles["BodyText"],
         fontName=regular_font,
-        fontSize=8,
-        leading=9.5,
+        fontSize=body_font_size,
+        leading=body_font_size + 2,
         textColor=colors.HexColor("#0f172a"),
     )
 
@@ -2329,8 +2362,21 @@ def _build_dashboard_pdf_table(
         ])
 
     available_width = landscape(A4)[0] - (18 * mm * 2)
-    col_width = available_width / max(len(safe_columns), 1)
-    table = LongTable(rows, colWidths=[col_width] * len(safe_columns), repeatRows=1)
+    if roomy:
+        weights = []
+        for column in safe_columns:
+            if column in {"Scrip", "Strategy", "Candle Analysis"}:
+                weights.append(1.6)
+            elif column in {"Total Profit / Loss", "Total PL Amt", "Win Rate %", "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade"}:
+                weights.append(1.25)
+            else:
+                weights.append(1.0)
+        total_weight = sum(weights) or len(safe_columns)
+        col_widths = [(available_width * weight) / total_weight for weight in weights]
+    else:
+        col_width = available_width / max(len(safe_columns), 1)
+        col_widths = [col_width] * len(safe_columns)
+    table = LongTable(rows, colWidths=col_widths, repeatRows=1)
     table.setStyle(
         TableStyle(
             [
@@ -2338,16 +2384,100 @@ def _build_dashboard_pdf_table(
                 ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
                 ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f8fafc")]),
                 ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#d1d5db")),
-                ("LEFTPADDING", (0, 0), (-1, -1), 5),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-                ("TOPPADDING", (0, 0), (-1, -1), 4),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7 if roomy else 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7 if roomy else 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 5 if roomy else 4),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5 if roomy else 4),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
             ]
         )
     )
     table_heading = ParagraphStyle("PdfTableHeading", parent=styles["Heading3"], fontName=bold_font)
     return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", table_heading), Spacer(1, 3 * mm), table]
+
+
+def _build_dashboard_pdf_chart_pages(
+    chart_specs: list[tuple[str, Any]],
+    *,
+    regular_font: str,
+    bold_font: str,
+) -> list[Any]:
+    styles = getSampleStyleSheet()
+    section_style = ParagraphStyle("PdfChartSection", parent=styles["Heading2"], fontName=bold_font, fontSize=12, leading=14)
+    chart_title_style = ParagraphStyle("PdfChartTitle", parent=styles["Heading3"], fontName=bold_font, fontSize=11, leading=13)
+    body_style = ParagraphStyle("PdfChartBody", parent=styles["BodyText"], fontName=regular_font, fontSize=9, leading=11)
+    elements: list[Any] = []
+    max_width = landscape(A4)[0] - (18 * mm * 2)
+    max_height = landscape(A4)[1] - (18 * mm * 2) - (18 * mm)
+
+    valid_specs = [(title, fig) for title, fig in chart_specs if fig is not None]
+    if not valid_specs:
+        return [Paragraph("<b>Charts</b>", section_style), Paragraph("No charts available", body_style)]
+
+    for index, (chart_title, fig) in enumerate(valid_specs):
+        if index > 0:
+            elements.append(PageBreak())
+        if index == 0:
+            elements.append(Paragraph("<b>Charts</b>", section_style))
+            elements.append(Spacer(1, 2 * mm))
+        elements.append(Paragraph(_pdf_escape_text(chart_title), chart_title_style))
+        elements.append(Spacer(1, 2 * mm))
+        try:
+            image_bytes = pio.to_image(fig, format="png", width=1600, height=900, scale=2)
+            chart_image = Image(BytesIO(image_bytes))
+            chart_image._restrictSize(max_width, max_height)
+            elements.append(chart_image)
+        except Exception as exc:
+            elements.append(Paragraph(f"Chart export unavailable: {_pdf_escape_text(exc)}", body_style))
+    return elements
+
+
+def _build_dashboard_pdf_grouped_details(
+    detail_df: pd.DataFrame,
+    detail_columns: list[str],
+    *,
+    detail_title: str,
+    detail_group_column: str | None,
+    regular_font: str,
+    bold_font: str,
+) -> list[Any]:
+    if detail_df.empty:
+        return _build_dashboard_pdf_table(
+            detail_df,
+            detail_columns,
+            title=detail_title,
+            regular_font=regular_font,
+            bold_font=bold_font,
+        )
+
+    if not detail_group_column or detail_group_column not in detail_df.columns:
+        return _build_dashboard_pdf_table(
+            detail_df,
+            detail_columns,
+            title=detail_title,
+            regular_font=regular_font,
+            bold_font=bold_font,
+        )
+
+    elements: list[Any] = []
+    grouped_df = detail_df.copy()
+    group_values = grouped_df[detail_group_column].fillna("Unknown").astype(str)
+    grouped_df = grouped_df.assign(__group_value=group_values)
+    for index, (group_value, group_df) in enumerate(grouped_df.groupby("__group_value", sort=True)):
+        if index > 0:
+            elements.append(PageBreak())
+        title = f"{detail_title} - {group_value}"
+        table_df = group_df.drop(columns=["__group_value"], errors="ignore")
+        elements.extend(
+            _build_dashboard_pdf_table(
+                table_df,
+                detail_columns,
+                title=title,
+                regular_font=regular_font,
+                bold_font=bold_font,
+            )
+        )
+    return elements
 
 
 def build_dashboard_pdf_report(
@@ -2362,6 +2492,8 @@ def build_dashboard_pdf_report(
     summary_columns: list[str],
     detail_columns: list[str],
     detail_title: str = "Detailed Data",
+    chart_specs: list[tuple[str, Any]] | None = None,
+    detail_group_column: str | None = None,
 ) -> bytes:
     regular_font, bold_font = get_dashboard_pdf_fonts()
     styles = getSampleStyleSheet()
@@ -2468,14 +2600,25 @@ def build_dashboard_pdf_report(
             title="Summary",
             regular_font=regular_font,
             bold_font=bold_font,
+            roomy=True,
         )
     )
+    if chart_specs:
+        elements.append(PageBreak())
+        elements.extend(
+            _build_dashboard_pdf_chart_pages(
+                chart_specs,
+                regular_font=regular_font,
+                bold_font=bold_font,
+            )
+        )
     elements.append(PageBreak())
     elements.extend(
-        _build_dashboard_pdf_table(
+        _build_dashboard_pdf_grouped_details(
             detail_df,
             detail_columns,
-            title=detail_title,
+            detail_title=detail_title,
+            detail_group_column=detail_group_column,
             regular_font=regular_font,
             bold_font=bold_font,
         )
@@ -2660,6 +2803,12 @@ def style_dashboard_table(table_df: pd.DataFrame) -> pd.io.formats.style.Styler:
         .apply(row_styles, axis=1)
         .format(formatters)
         .set_properties(**{"text-align": "center"})
+        .set_table_styles(
+            [
+                {"selector": "th", "props": [("padding", "10px 12px"), ("font-size", "13px")]},
+                {"selector": "td", "props": [("padding", "9px 12px"), ("font-size", "13px")]},
+            ]
+        )
     )
 
 
@@ -2700,6 +2849,19 @@ def render_dashboard_metric(
     cell.metric(label, display_value)
     metric_color = "#dc2626" if (numeric_value is not None and numeric_value < 0) else "#0f172a"
     return {"label": label, "value": display_value, "color": metric_color}
+
+
+def build_dashboard_summary_column_config() -> dict[str, Any]:
+    return {
+        "Scrip": st.column_config.TextColumn("Scrip", width="large"),
+        "Trades": st.column_config.NumberColumn("Trades", width="small"),
+        "Closed Trades": st.column_config.NumberColumn("Closed Trades", width="small"),
+        "Open Trades": st.column_config.NumberColumn("Open Trades", width="small"),
+        "Wins": st.column_config.NumberColumn("Wins", width="small"),
+        "Losses": st.column_config.NumberColumn("Losses", width="small"),
+        "Win Rate %": st.column_config.TextColumn("Win Rate %", width="medium"),
+        "Total Profit / Loss": st.column_config.TextColumn("Total Profit / Loss", width="medium"),
+    }
 
 
 def render_dashboard_box(
@@ -3132,6 +3294,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             }
             best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
             comparison_download_df = comparison_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
+            _, strategy_chart_specs = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
             comparison_pdf = build_dashboard_pdf_report(
                 report_title="Dashboard Summary Report",
                 output_dir=output_dir,
@@ -3158,6 +3321,8 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 summary_columns=["Strategy", "Rank", "Trades", "Win Rate %", "Total Profit / Loss", "Risk Reward Ratio", "Max Drawdown", "Score"],
                 detail_columns=["Strategy", "Rank", "Trades", "Total Profit Trades", "Total Loss Trades", "Win Rate %", "Total PL Amt", "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade", "Sharpe Ratio", "Max Drawdown", "Drawdown Duration", "Risk Reward Ratio", "DD Date", "Score"],
                 detail_title="Strategy Comparison Detail",
+                chart_specs=strategy_chart_specs,
+                detail_group_column="Strategy",
             )
             render_dashboard_section_header(
                 "KPI Overview",
@@ -3193,7 +3358,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
         with st.container():
             st.markdown("### Charts")
-            _, strategy_chart_specs = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
             for index in range(0, len(strategy_chart_specs), 2):
                 row_cols = st.columns(2)
                 for cell, (_, fig) in zip(row_cols, strategy_chart_specs[index:index + 2]):
@@ -3244,6 +3408,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     with st.container():
         summary_display_df = summary_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
         detail_display_df = filtered_df.rename(columns={"PL Amt": "Profit / Loss"})
+        _, chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
         summary_pdf = build_dashboard_pdf_report(
             report_title="Dashboard Summary Report",
             output_dir=output_dir,
@@ -3270,6 +3435,8 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             summary_columns=["Scrip", "Trades", "Closed Trades", "Open Trades", "Wins", "Losses", "Win Rate %", "Total Profit / Loss"],
             detail_columns=["Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade", "Entry Price", "Exit Date", "Exit Time", "Exit Price", "Qty", "Profit / Loss", "Candle Analysis"],
             detail_title="Trade Detail",
+            chart_specs=chart_specs,
+            detail_group_column="Scrip",
         )
         render_dashboard_section_header(
             "KPI Overview",
@@ -3305,7 +3472,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Charts")
-        _, chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
         for chart_title, fig in chart_specs:
             st.markdown(f"#### {chart_title}")
             if fig is None:
@@ -3319,7 +3485,8 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             style_dashboard_table(summary_display_df),
             use_container_width=True,
             hide_index=True,
-            height=min(CHART_HEIGHT, 420),
+            height=min(CHART_HEIGHT, 520),
+            column_config=build_dashboard_summary_column_config(),
         )
 
     with st.container():
