@@ -2101,7 +2101,25 @@ def compute_dashboard_expectancy_metrics(closed_df: pd.DataFrame) -> dict[str, f
         "avg_loss": avg_loss,
         "expectancy": expectancy,
         "risk_reward_ratio": risk_reward_ratio,
+        "avg_net": float(returns.mean()) if not returns.empty else 0.0,
     }
+
+
+def format_inr(value: Any) -> str:
+    if pd.isna(value):
+        return "₹ 0"
+    value = int(round(float(value)))
+    sign = "-" if value < 0 else ""
+    value = abs(value)
+    s = str(value)
+    if len(s) > 3:
+        last3 = s[-3:]
+        rest = s[:-3]
+        rest = ",".join([rest[max(i - 2, 0):i] for i in range(len(rest), 0, -2)][::-1])
+        formatted = rest + "," + last3
+    else:
+        formatted = s
+    return f"{sign}₹ {formatted}"
 
 
 def _normalize_dashboard_score_series(series: pd.Series, *, inverse: bool = False) -> pd.Series:
@@ -2126,10 +2144,10 @@ def apply_strategy_scorecard(comparison_df: pd.DataFrame) -> pd.DataFrame:
     scored_df = comparison_df.copy()
     normalized_pl = _normalize_dashboard_score_series(scored_df["Total PL Amt"])
     normalized_sharpe = _normalize_dashboard_score_series(scored_df["Sharpe Ratio"])
-    normalized_expectancy = _normalize_dashboard_score_series(scored_df["Expectancy"])
+    normalized_expectancy = _normalize_dashboard_score_series(scored_df["Avg Net Profit Per Trade"])
     normalized_winrate = _normalize_dashboard_score_series(scored_df["Win Rate %"])
     inverse_drawdown = _normalize_dashboard_score_series(scored_df["Max Drawdown"].abs(), inverse=True)
-    inverse_dd_duration = _normalize_dashboard_score_series(scored_df["Max DD Duration"], inverse=True)
+    inverse_dd_duration = _normalize_dashboard_score_series(scored_df["Drawdown Duration"], inverse=True)
 
     scored_df["Score"] = (
         (0.25 * normalized_pl)
@@ -2153,6 +2171,17 @@ def build_dashboard_metrics(filtered_df: pd.DataFrame) -> dict[str, Any]:
     equity_df = build_dashboard_equity_curve(closed_df)
     closed_trades = int(filtered_df["is_closed"].sum()) if "is_closed" in filtered_df.columns else 0
     expectancy_metrics = compute_dashboard_expectancy_metrics(closed_df)
+    max_drawdown = float(equity_df["Drawdown"].min()) if not equity_df.empty else 0.0
+    dd_date = "-"
+    if not equity_df.empty and "Drawdown" in equity_df.columns:
+        dd_index = equity_df["Drawdown"].idxmin()
+        if pd.notna(dd_index) and dd_index in equity_df.index:
+            dd_row = equity_df.loc[dd_index]
+            dd_date_value = dd_row.get("Entry Date")
+            if pd.notna(dd_date_value):
+                dd_date = str(dd_date_value)
+            elif pd.notna(dd_row.get("Entry Timestamp")):
+                dd_date = pd.Timestamp(dd_row["Entry Timestamp"]).strftime("%d-%b-%Y")
     return {
         "total_scrips": int(filtered_df["Scrip"].nunique()) if not filtered_df.empty else 0,
         "total_trades": int(len(filtered_df)),
@@ -2164,12 +2193,15 @@ def build_dashboard_metrics(filtered_df: pd.DataFrame) -> dict[str, Any]:
         "wins": int(expectancy_metrics["wins"]),
         "losses": int(expectancy_metrics["losses"]),
         "sharpe_ratio": compute_dashboard_sharpe(closed_df),
-        "max_drawdown": float(equity_df["Drawdown"].min()) if not equity_df.empty else 0.0,
+        "max_drawdown": max_drawdown,
         "max_drawdown_duration": compute_dashboard_drawdown_duration(equity_df),
-        "expectancy": float(expectancy_metrics["expectancy"]),
+        "avg_profit_per_trade": float(expectancy_metrics["avg_win"]),
+        "avg_loss_per_trade": float(expectancy_metrics["avg_loss"]) if int(expectancy_metrics["losses"]) else 0.0,
+        "avg_net_profit_per_trade": float(expectancy_metrics["avg_net"]),
         "risk_reward_ratio": float(expectancy_metrics["risk_reward_ratio"]),
         "avg_win": float(expectancy_metrics["avg_win"]),
         "avg_loss": float(expectancy_metrics["avg_loss"]),
+        "dd_date": dd_date,
         "equity_df": equity_df,
     }
 
@@ -2216,17 +2248,24 @@ def build_dashboard_summary_table(filtered_df: pd.DataFrame) -> pd.DataFrame:
 
 def style_dashboard_table(table_df: pd.DataFrame) -> pd.io.formats.style.Styler:
     safe_df = table_df.copy()
+    currency_columns = {
+        "Price", "Entry Price", "Exit Price", "PL Amt", "Total PL Amt",
+        "Total Profit / Loss", "Total Profit/Loss", "Profit / Loss",
+        "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade",
+        "Max Drawdown", "Total PL",
+    }
     number_columns = {
-        "Price", "Entry Price", "Exit Price", "PL Points", "PL Amt",
-        "Total PL Points", "Total PL Amt", "Win Rate %", "Avg PL Points", "Total PL",
-        "Sharpe Ratio", "Max Drawdown", "Expectancy", "Risk-Reward Ratio", "Score",
+        "PL Points", "Total PL Points", "Win Rate %", "Avg PL Points", "Sharpe Ratio",
+        "Risk-Reward Ratio", "Risk Reward Ratio", "Score",
     }
 
     def fmt_value(column: str, value: Any) -> str:
         if pd.isna(value):
             return ""
-        if column in {"Rank", "Sr.No", "Qty", "Trades", "Closed Trades", "Open Trades", "Wins", "Losses", "Max DD Duration"}:
+        if column in {"Rank", "Sr.No", "Qty", "Trades", "Closed Trades", "Open Trades", "Wins", "Losses", "Drawdown Duration", "Max DD Duration", "Total Profit Trades", "Total Loss Trades"}:
             return f"{int(value)}"
+        if column in currency_columns:
+            return format_inr(value)
         if column in number_columns:
             return f"{float(value):.2f}"
         return str(value)
@@ -2238,7 +2277,8 @@ def style_dashboard_table(table_df: pd.DataFrame) -> pd.io.formats.style.Styler:
         for idx, column in enumerate(row.index):
             if column not in {
                 "PL Amt", "Total PL Amt", "PL Points", "Total PL Points", "Avg PL Points",
-                "Total PL", "Expectancy", "Score", "Max Drawdown",
+                "Total PL", "Score", "Max Drawdown", "Profit / Loss", "Total Profit / Loss",
+                "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade",
             }:
                 continue
             value = row[column]
@@ -2261,18 +2301,59 @@ def style_dashboard_table(table_df: pd.DataFrame) -> pd.io.formats.style.Styler:
 
 
 def render_dashboard_metric(cell, label: str, value: Any, delta_value: float | None = None, *, percent: bool = False) -> None:
-    if isinstance(value, int):
+    numeric_value: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric_value = float(value)
+    if percent and numeric_value is not None:
+        display_value = f"{numeric_value:.2f}%"
+    elif label in {
+        "Total PL Amount",
+        "Total Profit / Loss",
+        "Avg Profit Per Trade",
+        "Avg Loss Per Trade",
+        "Avg Net Profit Per Trade",
+        "Max Drawdown",
+        "Total PL",
+    } and numeric_value is not None:
+        display_value = format_inr(numeric_value)
+    elif isinstance(value, int):
         display_value = f"{value}"
     elif isinstance(value, float):
-        display_value = f"{value:.2f}%" if percent else f"{value:.2f}"
+        display_value = f"{value:.2f}"
     else:
         display_value = str(value)
+
+    if numeric_value is not None and numeric_value < 0 and not percent:
+        cell.markdown(
+            f"""
+            <div style="padding:0.5rem 0.25rem 0.2rem 0.25rem;">
+                <div style="font-size:0.95rem;color:#6b7280;margin-bottom:0.25rem;">{label}</div>
+                <div style="font-size:1.6rem;font-weight:700;color:#b91c1c;line-height:1.1;">{display_value}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
 
     if delta_value is None:
         cell.metric(label, display_value)
         return
 
-    delta_text = f"{delta_value:+.2f}% " if percent else f"{delta_value:+.2f}"
+    delta_numeric = float(delta_value)
+    if label in {
+        "Total PL Amount",
+        "Total Profit / Loss",
+        "Avg Profit Per Trade",
+        "Avg Loss Per Trade",
+        "Avg Net Profit Per Trade",
+        "Max Drawdown",
+        "Total PL",
+    } and not percent:
+        delta_text = format_inr(delta_numeric)
+        if delta_numeric > 0:
+            delta_text = f"+{delta_text}"
+    else:
+        delta_text = f"{delta_numeric:+.2f}% " if percent else f"{delta_numeric:+.2f}"
     cell.metric(label, display_value, delta=delta_text.strip(), delta_color="normal")
 
 
@@ -2298,16 +2379,19 @@ def build_strategy_comparison_dashboard(
                 "Trades": int(len(filtered_df)),
                 "Closed Trades": int(metrics["closed_trades"]),
                 "Open Trades": int(metrics["open_trades"]),
-                "Wins": int(metrics["wins"]),
-                "Losses": int(metrics["losses"]),
+                "Total Profit Trades": int(metrics["wins"]),
+                "Total Loss Trades": int(metrics["losses"]),
                 "Total PL Points": float(metrics["total_pl_points"]),
                 "Win Rate %": float(metrics["win_rate"]),
                 "Total PL Amt": float(metrics["total_pl_amt"]),
                 "Sharpe Ratio": float(metrics["sharpe_ratio"]),
                 "Max Drawdown": float(metrics["max_drawdown"]),
-                "Max DD Duration": int(metrics["max_drawdown_duration"]),
-                "Expectancy": float(metrics["expectancy"]),
-                "Risk-Reward Ratio": float(metrics["risk_reward_ratio"]),
+                "Drawdown Duration": int(metrics["max_drawdown_duration"]),
+                "Avg Profit Per Trade": float(metrics["avg_profit_per_trade"]),
+                "Avg Loss Per Trade": float(metrics["avg_loss_per_trade"]),
+                "Avg Net Profit Per Trade": float(metrics["avg_net_profit_per_trade"]),
+                "Risk Reward Ratio": float(metrics["risk_reward_ratio"]),
+                "DD Date": metrics["dd_date"],
             }
         )
         if not metrics["equity_df"].empty:
@@ -2416,33 +2500,40 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             comparison_metrics = {
                 "total_scrips": int(len(comparison_df)),
                 "total_trades": int(pd.to_numeric(comparison_df["Trades"], errors="coerce").fillna(0).sum()),
-                "closed_trades": int(pd.to_numeric(comparison_df["Closed Trades"], errors="coerce").fillna(0).sum()),
-                "open_trades": int(pd.to_numeric(comparison_df["Open Trades"], errors="coerce").fillna(0).sum()),
-                "total_pl_points": float(pd.to_numeric(comparison_df["Total PL Points"], errors="coerce").fillna(0).sum()),
                 "total_pl_amt": float(pd.to_numeric(comparison_df["Total PL Amt"], errors="coerce").fillna(0).sum()),
                 "win_rate": float(pd.to_numeric(comparison_df["Win Rate %"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
                 "sharpe_ratio": float(pd.to_numeric(comparison_df["Sharpe Ratio"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
-                "max_dd_duration": float(pd.to_numeric(comparison_df["Max DD Duration"], errors="coerce").fillna(0).max()) if not comparison_df.empty else 0.0,
-                "expectancy": float(pd.to_numeric(comparison_df["Expectancy"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
-                "risk_reward_ratio": float(pd.to_numeric(comparison_df["Risk-Reward Ratio"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
+                "max_drawdown": float(pd.to_numeric(comparison_df["Max Drawdown"], errors="coerce").fillna(0).min()) if not comparison_df.empty else 0.0,
+                "avg_profit_per_trade": float(pd.to_numeric(comparison_df["Avg Profit Per Trade"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
+                "avg_loss_per_trade": float(pd.to_numeric(comparison_df["Avg Loss Per Trade"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
+                "avg_net_profit_per_trade": float(pd.to_numeric(comparison_df["Avg Net Profit Per Trade"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
+                "risk_reward_ratio": float(pd.to_numeric(comparison_df["Risk Reward Ratio"], errors="coerce").fillna(0).mean()) if not comparison_df.empty else 0.0,
+                "profit_trades": int(pd.to_numeric(comparison_df["Total Profit Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
+                "loss_trades": int(pd.to_numeric(comparison_df["Total Loss Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
             }
-            metric_cols = st.columns(9)
+            metric_cols = st.columns(6)
             render_dashboard_metric(metric_cols[0], "Strategies", comparison_metrics["total_scrips"])
             render_dashboard_metric(metric_cols[1], "Total Trades", comparison_metrics["total_trades"])
-            render_dashboard_metric(metric_cols[2], "Closed Trades", comparison_metrics["closed_trades"])
-            render_dashboard_metric(metric_cols[3], "Open Trades", comparison_metrics["open_trades"])
-            render_dashboard_metric(metric_cols[4], "Total PL Points", comparison_metrics["total_pl_points"], comparison_metrics["total_pl_points"])
-            render_dashboard_metric(metric_cols[5], "Total PL Amount", comparison_metrics["total_pl_amt"], comparison_metrics["total_pl_amt"])
-            render_dashboard_metric(metric_cols[6], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True)
-            render_dashboard_metric(metric_cols[7], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], comparison_metrics["sharpe_ratio"])
-            render_dashboard_metric(metric_cols[8], "Max DD Duration", int(comparison_metrics["max_dd_duration"]))
+            render_dashboard_metric(metric_cols[2], "Total PL Amount", comparison_metrics["total_pl_amt"], comparison_metrics["total_pl_amt"])
+            render_dashboard_metric(metric_cols[3], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True)
+            render_dashboard_metric(metric_cols[4], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], comparison_metrics["sharpe_ratio"])
+            render_dashboard_metric(metric_cols[5], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"])
 
         with st.container():
             st.markdown("### Advanced Metrics")
-            advanced_cols = st.columns(3)
-            render_dashboard_metric(advanced_cols[0], "Expectancy / Trade", comparison_metrics["expectancy"], comparison_metrics["expectancy"])
-            render_dashboard_metric(advanced_cols[1], "Risk-Reward Ratio", comparison_metrics["risk_reward_ratio"], comparison_metrics["risk_reward_ratio"])
-            render_dashboard_metric(advanced_cols[2], "Best Score", float(pd.to_numeric(comparison_df["Score"], errors="coerce").fillna(0).max()), float(pd.to_numeric(comparison_df["Score"], errors="coerce").fillna(0).max()))
+            advanced_row_1 = st.columns(3)
+            render_dashboard_metric(advanced_row_1[0], "Avg Profit Per Trade", comparison_metrics["avg_profit_per_trade"], comparison_metrics["avg_profit_per_trade"])
+            render_dashboard_metric(advanced_row_1[1], "Avg Loss Per Trade", comparison_metrics["avg_loss_per_trade"], -comparison_metrics["avg_loss_per_trade"])
+            render_dashboard_metric(advanced_row_1[2], "Avg Net Profit Per Trade", comparison_metrics["avg_net_profit_per_trade"], comparison_metrics["avg_net_profit_per_trade"])
+            advanced_row_2 = st.columns(3)
+            render_dashboard_metric(advanced_row_2[0], "Total Profit Trades", comparison_metrics["profit_trades"])
+            render_dashboard_metric(advanced_row_2[1], "Total Loss Trades", comparison_metrics["loss_trades"])
+            render_dashboard_metric(advanced_row_2[2], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True)
+            advanced_row_3 = st.columns(3)
+            render_dashboard_metric(advanced_row_3[0], "Risk Reward Ratio", comparison_metrics["risk_reward_ratio"], comparison_metrics["risk_reward_ratio"])
+            render_dashboard_metric(advanced_row_3[1], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"])
+            best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
+            render_dashboard_metric(advanced_row_3[2], "DD Date", best_dd_date)
 
         st.markdown("---")
 
@@ -2468,9 +2559,9 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 y="Total PL Amt",
                 color="Total PL Amt",
                 color_continuous_scale=["#b91c1c", "#e5e7eb", "#15803d"],
-                title="PL Comparison",
+                title="Profit / Loss Comparison",
             )
-            total_pl_fig.update_layout(height=360, xaxis_title="", yaxis_title="Total PL", coloraxis_showscale=False)
+            total_pl_fig.update_layout(height=360, xaxis_title="", yaxis_title="Total Profit / Loss", coloraxis_showscale=False)
             top_right.plotly_chart(total_pl_fig, use_container_width=True)
 
             bottom_left, bottom_right = st.columns(2)
@@ -2500,19 +2591,19 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             expectancy_fig = px.bar(
                 comparison_df,
                 x="Strategy",
-                y="Expectancy",
-                color="Expectancy",
+                y="Avg Net Profit Per Trade",
+                color="Avg Net Profit Per Trade",
                 color_continuous_scale=["#b91c1c", "#e5e7eb", "#15803d"],
-                title="Expectancy Comparison",
+                title="Avg Net Profit Per Trade Comparison",
             )
-            expectancy_fig.update_layout(height=360, xaxis_title="", yaxis_title="Expectancy", coloraxis_showscale=False)
+            expectancy_fig.update_layout(height=360, xaxis_title="", yaxis_title="Avg Net Profit / Trade", coloraxis_showscale=False)
             lower_left.plotly_chart(expectancy_fig, use_container_width=True)
 
             dd_duration_fig = px.bar(
                 comparison_df,
                 x="Strategy",
-                y="Max DD Duration",
-                color="Max DD Duration",
+                y="Drawdown Duration",
+                color="Drawdown Duration",
                 color_continuous_scale=["#15803d", "#e5e7eb", "#b91c1c"],
                 title="Drawdown Duration Comparison",
             )
@@ -2527,22 +2618,25 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 "Rank",
                 "Strategy",
                 "Trades",
-                "Closed Trades",
-                "Open Trades",
-                "Wins",
-                "Losses",
-                "Total PL Points",
+                "Total Profit Trades",
+                "Total Loss Trades",
                 "Win Rate %",
                 "Total PL Amt",
+                "Avg Profit Per Trade",
+                "Avg Loss Per Trade",
+                "Avg Net Profit Per Trade",
                 "Sharpe Ratio",
                 "Max Drawdown",
-                "Max DD Duration",
-                "Expectancy",
-                "Risk-Reward Ratio",
+                "Drawdown Duration",
+                "Risk Reward Ratio",
+                "DD Date",
                 "Score",
             ]
+            comparison_display_df = comparison_df.loc[:, table_columns].rename(
+                columns={"Total PL Amt": "Total Profit / Loss"}
+            )
             st.dataframe(
-                style_dashboard_table(comparison_df.loc[:, table_columns]),
+                style_dashboard_table(comparison_display_df),
                 use_container_width=True,
                 hide_index=True,
                 height=min(CHART_HEIGHT, 420),
@@ -2559,23 +2653,28 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### KPI Overview")
-        metric_cols = st.columns(9)
+        metric_cols = st.columns(6)
         render_dashboard_metric(metric_cols[0], "Total Scrips", metrics["total_scrips"])
         render_dashboard_metric(metric_cols[1], "Total Trades", metrics["total_trades"])
-        render_dashboard_metric(metric_cols[2], "Closed Trades", metrics["closed_trades"])
-        render_dashboard_metric(metric_cols[3], "Open Trades", metrics["open_trades"])
-        render_dashboard_metric(metric_cols[4], "Total PL Points", metrics["total_pl_points"], metrics["total_pl_points"])
-        render_dashboard_metric(metric_cols[5], "Total PL Amount", metrics["total_pl_amt"], metrics["total_pl_amt"])
-        render_dashboard_metric(metric_cols[6], "Win Rate %", metrics["win_rate"], metrics["win_rate"], percent=True)
-        render_dashboard_metric(metric_cols[7], "Sharpe Ratio", metrics["sharpe_ratio"], metrics["sharpe_ratio"])
-        render_dashboard_metric(metric_cols[8], "Max DD Duration", int(metrics["max_drawdown_duration"]))
+        render_dashboard_metric(metric_cols[2], "Total PL Amount", metrics["total_pl_amt"], metrics["total_pl_amt"])
+        render_dashboard_metric(metric_cols[3], "Win Rate %", metrics["win_rate"], metrics["win_rate"], percent=True)
+        render_dashboard_metric(metric_cols[4], "Sharpe Ratio", metrics["sharpe_ratio"], metrics["sharpe_ratio"])
+        render_dashboard_metric(metric_cols[5], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"])
 
     with st.container():
         st.markdown("### Advanced Metrics")
-        advanced_metric_cols = st.columns(3)
-        render_dashboard_metric(advanced_metric_cols[0], "Expectancy / Trade", metrics["expectancy"], metrics["expectancy"])
-        render_dashboard_metric(advanced_metric_cols[1], "Risk-Reward Ratio", metrics["risk_reward_ratio"], metrics["risk_reward_ratio"])
-        render_dashboard_metric(advanced_metric_cols[2], "DD Duration", int(metrics["max_drawdown_duration"]))
+        advanced_row_1 = st.columns(3)
+        render_dashboard_metric(advanced_row_1[0], "Avg Profit Per Trade", metrics["avg_profit_per_trade"], metrics["avg_profit_per_trade"])
+        render_dashboard_metric(advanced_row_1[1], "Avg Loss Per Trade", metrics["avg_loss_per_trade"], -metrics["avg_loss_per_trade"])
+        render_dashboard_metric(advanced_row_1[2], "Avg Net Profit Per Trade", metrics["avg_net_profit_per_trade"], metrics["avg_net_profit_per_trade"])
+        advanced_row_2 = st.columns(3)
+        render_dashboard_metric(advanced_row_2[0], "Total Profit Trades", metrics["wins"])
+        render_dashboard_metric(advanced_row_2[1], "Total Loss Trades", metrics["losses"])
+        render_dashboard_metric(advanced_row_2[2], "Win Rate %", metrics["win_rate"], metrics["win_rate"], percent=True)
+        advanced_row_3 = st.columns(3)
+        render_dashboard_metric(advanced_row_3[0], "Risk Reward Ratio", metrics["risk_reward_ratio"], metrics["risk_reward_ratio"])
+        render_dashboard_metric(advanced_row_3[1], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"])
+        render_dashboard_metric(advanced_row_3[2], "DD Date", metrics["dd_date"])
 
     st.markdown("---")
 
@@ -2588,9 +2687,9 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             y="Total PL Amt",
             color="Total PL Amt",
             color_continuous_scale=["#b91c1c", "#e5e7eb", "#15803d"],
-            title="P&L by Scrip",
+            title="Profit / Loss by Scrip",
         )
-        pnl_fig.update_layout(height=340, xaxis_title="", yaxis_title="PL Amount", coloraxis_showscale=False)
+        pnl_fig.update_layout(height=340, xaxis_title="", yaxis_title="Profit / Loss", coloraxis_showscale=False)
         chart_a.plotly_chart(pnl_fig, use_container_width=True)
 
         win_loss_df = pd.DataFrame({
@@ -2626,9 +2725,9 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Equity Drawdown")
-        drawdown_col, drawdown_duration_col, drawdown_chart_col = st.columns([1.0, 1.0, 4.0])
+        drawdown_col, dd_date_col, drawdown_chart_col = st.columns([1.0, 1.0, 4.0])
         render_dashboard_metric(drawdown_col, "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"])
-        render_dashboard_metric(drawdown_duration_col, "Max DD Duration", int(metrics["max_drawdown_duration"]))
+        render_dashboard_metric(dd_date_col, "DD Date", metrics["dd_date"])
         if metrics["equity_df"].empty:
             drawdown_chart_col.info("No closed trades available for drawdown.")
         else:
@@ -2646,8 +2745,9 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Per-Scrip Summary")
+        summary_display_df = summary_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
         st.dataframe(
-            style_dashboard_table(summary_df),
+            style_dashboard_table(summary_display_df),
             use_container_width=True,
             hide_index=True,
             height=min(CHART_HEIGHT, 420),
@@ -2667,11 +2767,11 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         scrip_df = filtered_df[filtered_df["Scrip"] == selected_scrip].copy().reset_index(drop=True)
         scrip_closed_df = scrip_df[scrip_df["is_closed"]].copy()
         scrip_win_rate = (float(scrip_closed_df["is_win"].sum()) / float(len(scrip_closed_df)) * 100.0) if len(scrip_closed_df) else 0.0
-        avg_pl_points = float(pd.to_numeric(scrip_closed_df.get("PL Points"), errors="coerce").dropna().mean()) if not scrip_closed_df.empty else 0.0
+        avg_profit_per_trade = float(pd.to_numeric(scrip_closed_df.get("PL Amt"), errors="coerce").where(pd.to_numeric(scrip_closed_df.get("PL Amt"), errors="coerce") > 0).dropna().mean()) if not scrip_closed_df.empty else 0.0
         total_pl = float(pd.to_numeric(scrip_df.get("PL Amt"), errors="coerce").fillna(0).sum()) if not scrip_df.empty else 0.0
         drill_metric_a, drill_metric_b, drill_metric_c = st.columns(3)
         render_dashboard_metric(drill_metric_a, "Win Rate %", scrip_win_rate, scrip_win_rate, percent=True)
-        render_dashboard_metric(drill_metric_b, "Avg PL Points", avg_pl_points, avg_pl_points)
+        render_dashboard_metric(drill_metric_b, "Avg Profit Per Trade", avg_profit_per_trade, avg_profit_per_trade)
         render_dashboard_metric(drill_metric_c, "Total PL", total_pl, total_pl)
         detail_columns = [
             "Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade",
@@ -2679,8 +2779,9 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             "Qty", "PL Points", "PL Amt", "Candle Analysis",
         ]
         detail_columns = [column for column in detail_columns if column in scrip_df.columns]
+        detail_display_df = scrip_df.loc[:, detail_columns].rename(columns={"PL Amt": "Profit / Loss"})
         st.dataframe(
-            style_dashboard_table(scrip_df.loc[:, detail_columns]),
+            style_dashboard_table(detail_display_df),
             use_container_width=True,
             hide_index=True,
             height=min(CHART_HEIGHT, 420),
