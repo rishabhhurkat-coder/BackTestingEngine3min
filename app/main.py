@@ -2418,6 +2418,57 @@ def render_dashboard_metric(
     return {"label": label, "value": display_value, "color": metric_color}
 
 
+def render_dashboard_box(
+    cell,
+    title: str,
+    value: Any,
+    *,
+    percent: bool = False,
+    force_green: bool = False,
+    force_red: bool = False,
+) -> None:
+    numeric_value: float | None = None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        numeric_value = float(value)
+
+    currency_labels = {
+        "Total PL",
+        "Avg Profit Per Trade",
+        "Avg Loss Per Trade",
+        "Avg Net Profit Per Trade",
+        "Max Drawdown",
+    }
+
+    if percent and numeric_value is not None:
+        display_value = f"{numeric_value:.2f}%"
+    elif title in currency_labels and numeric_value is not None:
+        display_value = format_inr(numeric_value)
+    elif title in {"Sharpe Ratio", "Risk Reward Ratio"} and numeric_value is not None:
+        display_value = f"{numeric_value:.2f}"
+    elif isinstance(value, int):
+        display_value = str(value)
+    elif isinstance(value, float):
+        display_value = f"{value:.2f}"
+    else:
+        display_value = str(value)
+
+    color_class = ""
+    if force_red or (numeric_value is not None and numeric_value < 0):
+        color_class = "card-red"
+    elif force_green or (numeric_value is not None and numeric_value > 0):
+        color_class = "card-green"
+
+    cell.markdown(
+        f"""
+        <div class="card">
+            <div class="card-title">{html.escape(title)}</div>
+            <div class="card-value {color_class}">{html.escape(display_value)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def build_strategy_comparison_dashboard(
     output_dir: Path,
     start_date: Any,
@@ -2586,29 +2637,29 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 download_key="dashboard-summary-strategy",
             )
             metric_row_1 = st.columns(3)
-            render_dashboard_metric(metric_row_1[0], "Strategies", comparison_metrics["total_scrips"])
-            render_dashboard_metric(metric_row_1[1], "Total Trades", comparison_metrics["total_trades"])
-            render_dashboard_metric(metric_row_1[2], "Total PL", comparison_metrics["total_pl_amt"])
+            render_dashboard_box(metric_row_1[0], "Strategies", comparison_metrics["total_scrips"])
+            render_dashboard_box(metric_row_1[1], "Total PL", comparison_metrics["total_pl_amt"], force_green=comparison_metrics["total_pl_amt"] > 0)
+            render_dashboard_box(metric_row_1[2], "Win Rate %", comparison_metrics["win_rate"], percent=True, force_green=comparison_metrics["win_rate"] > 0)
             metric_row_2 = st.columns(3)
-            render_dashboard_metric(metric_row_2[0], "Win Rate %", comparison_metrics["win_rate"], percent=True)
-            render_dashboard_metric(metric_row_2[1], "Sharpe Ratio", comparison_metrics["sharpe_ratio"])
-            render_dashboard_metric(metric_row_2[2], "Max Drawdown", comparison_metrics["max_drawdown"])
+            render_dashboard_box(metric_row_2[0], "Risk Reward Ratio", comparison_metrics["risk_reward_ratio"], force_green=comparison_metrics["risk_reward_ratio"] > 0)
+            render_dashboard_box(metric_row_2[1], "Max Drawdown", comparison_metrics["max_drawdown"], force_red=True)
+            metric_row_2[2].empty()
 
         with st.container():
             st.markdown("### Advanced Metrics")
             advanced_row_1 = st.columns(3)
-            render_dashboard_metric(advanced_row_1[0], "Avg Profit Per Trade", comparison_metrics["avg_profit_per_trade"])
-            render_dashboard_metric(advanced_row_1[1], "Avg Loss Per Trade", comparison_metrics["avg_loss_per_trade"])
-            render_dashboard_metric(advanced_row_1[2], "Avg Net Profit Per Trade", comparison_metrics["avg_net_profit_per_trade"])
+            render_dashboard_box(advanced_row_1[0], "Avg Profit Per Trade", comparison_metrics["avg_profit_per_trade"], force_green=comparison_metrics["avg_profit_per_trade"] > 0)
+            render_dashboard_box(advanced_row_1[1], "Avg Loss Per Trade", comparison_metrics["avg_loss_per_trade"], force_red=True)
+            render_dashboard_box(advanced_row_1[2], "Avg Net Profit Per Trade", comparison_metrics["avg_net_profit_per_trade"], force_green=comparison_metrics["avg_net_profit_per_trade"] > 0)
             advanced_row_2 = st.columns(3)
-            render_dashboard_metric(advanced_row_2[0], "Total Profit Trades", comparison_metrics["profit_trades"])
-            render_dashboard_metric(advanced_row_2[1], "Total Loss Trades", comparison_metrics["loss_trades"])
-            render_dashboard_metric(advanced_row_2[2], "Win Rate %", comparison_metrics["win_rate"], percent=True)
+            render_dashboard_box(advanced_row_2[0], "Total Profit Trades", comparison_metrics["profit_trades"])
+            render_dashboard_box(advanced_row_2[1], "Total Loss Trades", comparison_metrics["loss_trades"])
+            render_dashboard_box(advanced_row_2[2], "Total Trades", comparison_metrics["total_trades"])
             advanced_row_3 = st.columns(3)
-            render_dashboard_metric(advanced_row_3[0], "Risk Reward Ratio", comparison_metrics["risk_reward_ratio"])
-            render_dashboard_metric(advanced_row_3[1], "Max Drawdown", comparison_metrics["max_drawdown"])
+            render_dashboard_box(advanced_row_3[0], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], force_green=comparison_metrics["sharpe_ratio"] > 0)
+            render_dashboard_box(advanced_row_3[1], "Max Drawdown", comparison_metrics["max_drawdown"], force_red=True)
             best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
-            render_dashboard_metric(advanced_row_3[2], "DD Date", best_dd_date)
+            render_dashboard_box(advanced_row_3[2], "DD Date", best_dd_date, force_red=True)
 
         with st.container():
             st.markdown("### Charts")
@@ -2733,28 +2784,28 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             download_key="dashboard-summary-single",
         )
         metric_row_1 = st.columns(3)
-        render_dashboard_metric(metric_row_1[0], "Total Scrips", metrics["total_scrips"])
-        render_dashboard_metric(metric_row_1[1], "Total Trades", metrics["total_trades"])
-        render_dashboard_metric(metric_row_1[2], "Total PL", metrics["total_pl_amt"])
+        render_dashboard_box(metric_row_1[0], "Total Scrips", metrics["total_scrips"])
+        render_dashboard_box(metric_row_1[1], "Total PL", metrics["total_pl_amt"], force_green=metrics["total_pl_amt"] > 0)
+        render_dashboard_box(metric_row_1[2], "Win Rate %", metrics["win_rate"], percent=True, force_green=metrics["win_rate"] > 0)
         metric_row_2 = st.columns(3)
-        render_dashboard_metric(metric_row_2[0], "Win Rate %", metrics["win_rate"], percent=True)
-        render_dashboard_metric(metric_row_2[1], "Sharpe Ratio", metrics["sharpe_ratio"])
-        render_dashboard_metric(metric_row_2[2], "Max Drawdown", metrics["max_drawdown"])
+        render_dashboard_box(metric_row_2[0], "Risk Reward Ratio", metrics["risk_reward_ratio"], force_green=metrics["risk_reward_ratio"] > 0)
+        render_dashboard_box(metric_row_2[1], "Max Drawdown", metrics["max_drawdown"], force_red=True)
+        metric_row_2[2].empty()
 
     with st.container():
         st.markdown("### Advanced Metrics")
         advanced_row_1 = st.columns(3)
-        render_dashboard_metric(advanced_row_1[0], "Avg Profit Per Trade", metrics["avg_profit_per_trade"])
-        render_dashboard_metric(advanced_row_1[1], "Avg Loss Per Trade", metrics["avg_loss_per_trade"])
-        render_dashboard_metric(advanced_row_1[2], "Avg Net Profit Per Trade", metrics["avg_net_profit_per_trade"])
+        render_dashboard_box(advanced_row_1[0], "Avg Profit Per Trade", metrics["avg_profit_per_trade"], force_green=metrics["avg_profit_per_trade"] > 0)
+        render_dashboard_box(advanced_row_1[1], "Avg Loss Per Trade", metrics["avg_loss_per_trade"], force_red=True)
+        render_dashboard_box(advanced_row_1[2], "Avg Net Profit Per Trade", metrics["avg_net_profit_per_trade"], force_green=metrics["avg_net_profit_per_trade"] > 0)
         advanced_row_2 = st.columns(3)
-        render_dashboard_metric(advanced_row_2[0], "Total Profit Trades", metrics["wins"])
-        render_dashboard_metric(advanced_row_2[1], "Total Loss Trades", metrics["losses"])
-        render_dashboard_metric(advanced_row_2[2], "Win Rate %", metrics["win_rate"], percent=True)
+        render_dashboard_box(advanced_row_2[0], "Total Profit Trades", metrics["wins"])
+        render_dashboard_box(advanced_row_2[1], "Total Loss Trades", metrics["losses"])
+        render_dashboard_box(advanced_row_2[2], "Total Trades", metrics["total_trades"])
         advanced_row_3 = st.columns(3)
-        render_dashboard_metric(advanced_row_3[0], "Risk Reward Ratio", metrics["risk_reward_ratio"])
-        render_dashboard_metric(advanced_row_3[1], "Max Drawdown", metrics["max_drawdown"])
-        render_dashboard_metric(advanced_row_3[2], "DD Date", metrics["dd_date"])
+        render_dashboard_box(advanced_row_3[0], "Sharpe Ratio", metrics["sharpe_ratio"], force_green=metrics["sharpe_ratio"] > 0)
+        render_dashboard_box(advanced_row_3[1], "Max Drawdown", metrics["max_drawdown"], force_red=True)
+        render_dashboard_box(advanced_row_3[2], "DD Date", metrics["dd_date"], force_red=True)
 
     with st.container():
         st.markdown("### Charts")
