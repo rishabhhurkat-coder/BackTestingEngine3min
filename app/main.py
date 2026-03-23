@@ -2899,6 +2899,224 @@ def build_dashboard_summary_column_config() -> dict[str, Any]:
     }
 
 
+def build_time_analysis_table(filtered_df: pd.DataFrame, granularity: str) -> pd.DataFrame:
+    if filtered_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Period", "Trades", "Wins", "Losses", "Win Rate %", "Total Profit / Loss",
+                "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade",
+            ]
+        )
+
+    working_df = filtered_df.copy()
+    timestamps = pd.to_datetime(working_df["Entry Timestamp"], errors="coerce")
+    if granularity == "Year":
+        working_df["Period"] = timestamps.dt.strftime("%Y")
+    elif granularity == "Quarter":
+        working_df["Period"] = timestamps.dt.to_period("Q").astype(str)
+    elif granularity == "Month":
+        working_df["Period"] = timestamps.dt.strftime("%b %Y")
+    elif granularity == "Week":
+        iso_year = timestamps.dt.isocalendar().year.astype(str)
+        iso_week = timestamps.dt.isocalendar().week.astype(str).str.zfill(2)
+        working_df["Period"] = "W" + iso_week + " " + iso_year
+    else:
+        working_df["Period"] = timestamps.dt.strftime("%d-%b-%Y")
+
+    grouped = (
+        working_df.groupby("Period", dropna=False)
+        .agg(
+            Trades=("Scrip", "size"),
+            Wins=("is_win", "sum"),
+            Losses=("is_loss", "sum"),
+            Total_PL_Amt=("PL Amt", "sum"),
+            Avg_Profit=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").where(pd.to_numeric(s, errors="coerce") > 0).dropna().mean()),
+            Avg_Loss=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").where(pd.to_numeric(s, errors="coerce") < 0).dropna().abs().mean()),
+            Avg_Net=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").dropna().mean()),
+        )
+        .reset_index()
+    )
+    grouped["Win Rate %"] = grouped.apply(
+        lambda row: (float(row["Wins"]) / float(row["Trades"]) * 100.0) if float(row["Trades"]) else 0.0,
+        axis=1,
+    )
+    grouped = grouped.rename(
+        columns={
+            "Total_PL_Amt": "Total Profit / Loss",
+            "Avg_Profit": "Avg Profit Per Trade",
+            "Avg_Loss": "Avg Loss Per Trade",
+            "Avg_Net": "Avg Net Profit Per Trade",
+        }
+    )
+    return grouped.sort_values("Period", kind="stable").reset_index(drop=True)
+
+
+def build_scrip_analysis_table(filtered_df: pd.DataFrame) -> pd.DataFrame:
+    if filtered_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "Scrip", "Trades", "Wins", "Losses", "Win Rate %", "Total Profit / Loss",
+                "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade",
+                "Best Trade", "Worst Trade",
+            ]
+        )
+
+    grouped = (
+        filtered_df.groupby("Scrip", dropna=False)
+        .agg(
+            Trades=("Scrip", "size"),
+            Wins=("is_win", "sum"),
+            Losses=("is_loss", "sum"),
+            Total_PL_Amt=("PL Amt", "sum"),
+            Avg_Profit=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").where(pd.to_numeric(s, errors="coerce") > 0).dropna().mean()),
+            Avg_Loss=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").where(pd.to_numeric(s, errors="coerce") < 0).dropna().abs().mean()),
+            Avg_Net=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").dropna().mean()),
+            Best_Trade=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").dropna().max()),
+            Worst_Trade=("PL Amt", lambda s: pd.to_numeric(s, errors="coerce").dropna().min()),
+        )
+        .reset_index()
+    )
+    grouped["Win Rate %"] = grouped.apply(
+        lambda row: (float(row["Wins"]) / float(row["Trades"]) * 100.0) if float(row["Trades"]) else 0.0,
+        axis=1,
+    )
+    grouped = grouped.rename(
+        columns={
+            "Total_PL_Amt": "Total Profit / Loss",
+            "Avg_Profit": "Avg Profit Per Trade",
+            "Avg_Loss": "Avg Loss Per Trade",
+            "Avg_Net": "Avg Net Profit Per Trade",
+            "Best_Trade": "Best Trade",
+            "Worst_Trade": "Worst Trade",
+        }
+    )
+    return grouped.sort_values(["Total Profit / Loss", "Scrip"], ascending=[False, True], kind="stable").reset_index(drop=True)
+
+
+def _build_pivot_period_column(filtered_df: pd.DataFrame, granularity: str) -> pd.Series:
+    timestamps = pd.to_datetime(filtered_df["Entry Timestamp"], errors="coerce")
+    if granularity == "Year":
+        return timestamps.dt.strftime("%Y")
+    if granularity == "Quarter":
+        return timestamps.dt.to_period("Q").astype(str)
+    if granularity == "Month":
+        return timestamps.dt.strftime("%b %Y")
+    if granularity == "Week":
+        iso_year = timestamps.dt.isocalendar().year.astype(str)
+        iso_week = timestamps.dt.isocalendar().week.astype(str).str.zfill(2)
+        return "W" + iso_week + " " + iso_year
+    return timestamps.dt.strftime("%d-%b-%Y")
+
+
+def build_pivot_analysis_table(filtered_df: pd.DataFrame, granularity: str, value_metric: str) -> pd.DataFrame:
+    if filtered_df.empty:
+        return pd.DataFrame()
+
+    working_df = filtered_df.copy()
+    working_df["Pivot Period"] = _build_pivot_period_column(working_df, granularity)
+    if value_metric == "Total Profit / Loss":
+        pivot_df = pd.pivot_table(
+            working_df,
+            index="Pivot Period",
+            columns="Scrip",
+            values="PL Amt",
+            aggfunc="sum",
+            fill_value=0.0,
+        )
+    elif value_metric == "Trades":
+        pivot_df = pd.pivot_table(
+            working_df,
+            index="Pivot Period",
+            columns="Scrip",
+            values="Scrip",
+            aggfunc="count",
+            fill_value=0,
+        )
+    elif value_metric == "Win Rate %":
+        win_rate_df = (
+            working_df.groupby(["Pivot Period", "Scrip"], dropna=False)
+            .agg(Trades=("Scrip", "size"), Wins=("is_win", "sum"))
+            .reset_index()
+        )
+        win_rate_df["Value"] = win_rate_df.apply(
+            lambda row: (float(row["Wins"]) / float(row["Trades"]) * 100.0) if float(row["Trades"]) else 0.0,
+            axis=1,
+        )
+        pivot_df = pd.pivot_table(
+            win_rate_df,
+            index="Pivot Period",
+            columns="Scrip",
+            values="Value",
+            aggfunc="first",
+            fill_value=0.0,
+        )
+    else:
+        avg_net_df = (
+            working_df.groupby(["Pivot Period", "Scrip"], dropna=False)["PL Amt"]
+            .mean()
+            .reset_index(name="Value")
+        )
+        pivot_df = pd.pivot_table(
+            avg_net_df,
+            index="Pivot Period",
+            columns="Scrip",
+            values="Value",
+            aggfunc="first",
+            fill_value=0.0,
+        )
+
+    pivot_df = pivot_df.sort_index(kind="stable")
+    pivot_df.columns = [str(column) for column in pivot_df.columns]
+    pivot_df = pivot_df.reset_index().rename(columns={"Pivot Period": granularity})
+    return pivot_df
+
+
+def style_pivot_table(pivot_df: pd.DataFrame, value_metric: str) -> pd.io.formats.style.Styler:
+    safe_df = pivot_df.copy()
+    value_columns = [column for column in safe_df.columns if column != safe_df.columns[0]]
+
+    def fmt_value(column: str, value: Any) -> str:
+        if pd.isna(value):
+            return ""
+        if column not in value_columns:
+            return str(value)
+        if value_metric in {"Total Profit / Loss", "Avg Net Profit Per Trade"}:
+            return format_inr(value)
+        if value_metric == "Win Rate %":
+            return f"{float(value):.2f}%"
+        return f"{int(round(float(value)))}"
+
+    formatters = {column: (lambda value, col=column: fmt_value(col, value)) for column in safe_df.columns}
+
+    def row_styles(row: pd.Series) -> list[str]:
+        styles = [""] * len(row)
+        for idx, column in enumerate(row.index):
+            if column not in value_columns:
+                continue
+            value = row[column]
+            if pd.isna(value):
+                continue
+            if value_metric in {"Total Profit / Loss", "Avg Net Profit Per Trade"}:
+                if float(value) > 0:
+                    styles[idx] = "color: #15803d; font-weight: 700;"
+                elif float(value) < 0:
+                    styles[idx] = "color: #b91c1c; font-weight: 700;"
+        return styles
+
+    return (
+        safe_df.style
+        .apply(row_styles, axis=1)
+        .format(formatters)
+        .set_properties(**{"text-align": "center"})
+        .set_table_styles(
+            [
+                {"selector": "th", "props": [("padding", "10px 12px"), ("font-size", "13px")]},
+                {"selector": "td", "props": [("padding", "9px 12px"), ("font-size", "13px")]},
+            ]
+        )
+    )
+
+
 def render_dashboard_box(
     cell,
     title: str,
@@ -3469,14 +3687,81 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 st.plotly_chart(fig, width="stretch")
 
     with st.container():
-        st.markdown("### Per-Scrip Summary")
+        st.markdown("### Time Analysis")
+        time_granularity = st.selectbox(
+            "Group By Time",
+            options=["Year", "Quarter", "Month", "Week", "Day"],
+            index=2,
+            key="dashboard_time_analysis_granularity",
+        )
+        time_analysis_df = build_time_analysis_table(filtered_df, time_granularity)
         st.dataframe(
-            style_dashboard_table(summary_display_df),
+            style_dashboard_table(time_analysis_df),
+            width="stretch",
+            hide_index=True,
+            height=min(CHART_HEIGHT, 420),
+        )
+
+    with st.container():
+        st.markdown("### Scrip Analysis")
+        scrip_analysis_df = build_scrip_analysis_table(filtered_df)
+        st.dataframe(
+            style_dashboard_table(scrip_analysis_df),
             width="stretch",
             hide_index=True,
             height=min(CHART_HEIGHT, 520),
-            column_config=build_dashboard_summary_column_config(),
         )
+
+    with st.container():
+        st.markdown("### Pivot View")
+        pivot_col_a, pivot_col_b, pivot_col_c = st.columns([1.0, 1.0, 1.0])
+        with pivot_col_a:
+            pivot_granularity = st.selectbox(
+                "Time Group",
+                options=["Year", "Quarter", "Month", "Week", "Day"],
+                index=2,
+                key="dashboard_pivot_granularity",
+            )
+        with pivot_col_b:
+            pivot_value_metric = st.selectbox(
+                "Value",
+                options=["Total Profit / Loss", "Trades", "Win Rate %", "Avg Net Profit Per Trade"],
+                index=0,
+                key="dashboard_pivot_value_metric",
+            )
+        with pivot_col_c:
+            pivot_view_mode = st.selectbox(
+                "View",
+                options=["Table", "Heatmap"],
+                index=0,
+                key="dashboard_pivot_view_mode",
+            )
+        pivot_df = build_pivot_analysis_table(filtered_df, pivot_granularity, pivot_value_metric)
+        if pivot_df.empty:
+            st.info("No data available")
+        elif pivot_view_mode == "Table":
+            st.dataframe(
+                style_pivot_table(pivot_df, pivot_value_metric),
+                width="stretch",
+                hide_index=True,
+                height=min(CHART_HEIGHT, 520),
+            )
+        else:
+            heatmap_source = pivot_df.set_index(pivot_df.columns[0])
+            heatmap_fig = px.imshow(
+                heatmap_source,
+                aspect="auto",
+                color_continuous_scale=["#fee2e2", "#f8fafc", "#dcfce7"] if pivot_value_metric in {"Total Profit / Loss", "Avg Net Profit Per Trade"} else "Blues",
+                title=f"{pivot_value_metric} by {pivot_granularity} and Scrip",
+            )
+            style_dashboard_chart(
+                heatmap_fig,
+                height=460,
+                xaxis_title="Scrip",
+                yaxis_title=pivot_granularity,
+                hovermode=None,
+            )
+            st.plotly_chart(heatmap_fig, width="stretch")
 
     with st.container():
         st.markdown("### Drill-Down")
