@@ -3649,6 +3649,14 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     if not selected_dashboard_scrips:
         st.warning("Please select at least one scrip.")
         return
+    preview_filtered_df = filter_dashboard_trade_rows(
+        root_df,
+        filter_from_date,
+        filter_to_date,
+        False,
+        selected_scrips=selected_dashboard_scrips,
+    )
+    active_scrip_count = int(preview_filtered_df["Scrip"].nunique()) if not preview_filtered_df.empty else len(selected_dashboard_scrips)
     selected_scrips_text = select_all_label if len(selected_dashboard_scrips) == len(available_scrips) else ", ".join(display_symbol(scrip) for scrip in selected_dashboard_scrips)
     input_header_col, input_popover_col = st.columns([0.75, 0.25])
     with input_header_col:
@@ -3690,12 +3698,13 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                     step=0.5,
                     key="dashboard_prop_interest_rate",
                 )
-                capital_preview = avg_value_traded_per_lot * 0.25 * 0.20 * len(selected_dashboard_scrips)
-                monthly_interest_preview = avg_value_traded_per_lot * len(selected_dashboard_scrips) * 0.25 * ((interest_rate_pct / 100.0) / 12.0)
+                capital_preview = avg_value_traded_per_lot * 0.25 * 0.20 * active_scrip_count
+                monthly_interest_preview = avg_value_traded_per_lot * active_scrip_count * 0.25 * ((interest_rate_pct / 100.0) / 12.0)
                 st.metric("Capital", format_inr(capital_preview))
                 st.metric("Interest / Month", format_inr(monthly_interest_preview))
-                st.caption("Capital = Value Traded x 25% x 20% x No. of Scrips")
-                st.caption("Interest / Month = No. of Scrips x Value Traded x 25% x (Interest Rate / 12)")
+                st.caption(f"Active Scrips in current filter: {active_scrip_count}")
+                st.caption("Capital = Value Traded x 25% x 20% x Active Scrips")
+                st.caption("Interest / Month = Active Scrips x Value Traded x 25% x (Annual Interest Rate / 12)")
             else:
                 st.caption("Current mode deducts only the estimated charges per trade.")
     filters_text = (
@@ -3820,7 +3829,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         avg_value_traded_per_lot=avg_value_traded_per_lot,
         leverage=leverage,
         interest_rate_pct=interest_rate_pct,
-        selected_scrip_count=len(selected_dashboard_scrips),
+        selected_scrip_count=active_scrip_count,
     )
 
     metrics = build_dashboard_metrics(filtered_df)
@@ -3837,6 +3846,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     avg_monthly_net_before_interest = float(closed_monthly_net_series.mean()) if not closed_monthly_net_series.empty else 0.0
     net_prop_pl_amt = avg_monthly_net_before_interest - float(cost_metrics["monthly_interest_total"])
     monthly_roi_pct = (net_prop_pl_amt / float(cost_metrics["capital"]) * 100.0) if float(cost_metrics["capital"]) > 0 else 0.0
+    metrics["no_of_months"] = int(len(closed_monthly_net_series))
     metrics["avg_monthly_net_before_interest"] = avg_monthly_net_before_interest
     metrics["net_prop_pl_amt"] = net_prop_pl_amt
     metrics["monthly_roi_pct"] = monthly_roi_pct
@@ -3876,7 +3886,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     if prop_dashboard_enabled:
         with st.container():
             st.markdown("### Prop Specific View")
-            prop_row_1 = st.columns(2)
+            prop_row_1 = st.columns(3)
             render_dashboard_box(
                 prop_row_1[0],
                 "Avg Monthly Net PL Before Interest",
@@ -3889,6 +3899,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 metrics["monthly_interest_total"],
                 force_red=metrics["monthly_interest_total"] > 0,
             )
+            render_dashboard_box(prop_row_1[2], "No. of Months", metrics["no_of_months"])
             prop_row_2 = st.columns(2)
             render_dashboard_box(
                 prop_row_2[0],
