@@ -2974,6 +2974,24 @@ def build_dashboard_summary_column_config() -> dict[str, Any]:
     }
 
 
+def _build_period_label_and_sort(
+    timestamps: pd.Series,
+    granularity: str,
+) -> tuple[pd.Series, pd.Series]:
+    parsed = pd.to_datetime(timestamps, errors="coerce")
+    if granularity == "Year":
+        return parsed.dt.strftime("%Y"), parsed.dt.to_period("Y").dt.start_time
+    if granularity == "Quarter":
+        return parsed.dt.to_period("Q").astype(str), parsed.dt.to_period("Q").dt.start_time
+    if granularity == "Month":
+        return parsed.dt.strftime("%b %Y"), parsed.dt.to_period("M").dt.start_time
+    if granularity == "Week":
+        iso_year = parsed.dt.isocalendar().year.astype(str)
+        iso_week = parsed.dt.isocalendar().week.astype(str).str.zfill(2)
+        return "W" + iso_week + " " + iso_year, parsed.dt.to_period("W-SUN").dt.start_time
+    return parsed.dt.strftime("%d-%b-%Y"), parsed.dt.normalize()
+
+
 def build_time_analysis_table(
     filtered_df: pd.DataFrame,
     granularity: str,
@@ -2990,23 +3008,12 @@ def build_time_analysis_table(
         )
 
     working_df = filtered_df.copy()
-    timestamps = pd.to_datetime(working_df["Entry Timestamp"], errors="coerce")
-    if granularity == "Year":
-        working_df["Period"] = timestamps.dt.strftime("%Y")
-    elif granularity == "Quarter":
-        working_df["Period"] = timestamps.dt.to_period("Q").astype(str)
-    elif granularity == "Month":
-        working_df["Period"] = timestamps.dt.strftime("%b %Y")
-    elif granularity == "Week":
-        iso_year = timestamps.dt.isocalendar().year.astype(str)
-        iso_week = timestamps.dt.isocalendar().week.astype(str).str.zfill(2)
-        working_df["Period"] = "W" + iso_week + " " + iso_year
-    else:
-        working_df["Period"] = timestamps.dt.strftime("%d-%b-%Y")
+    working_df["Period"], working_df["Period Sort"] = _build_period_label_and_sort(working_df["Entry Timestamp"], granularity)
 
     grouped = (
         working_df.groupby("Period", dropna=False)
         .agg(
+            Period_Sort=("Period Sort", "min"),
             Trades=("Scrip", "size"),
             Wins=("is_win", "sum"),
             Losses=("is_loss", "sum"),
@@ -3051,7 +3058,8 @@ def build_time_analysis_table(
             )
         else:
             grouped["Interest Deducted"] = 0.0
-    return grouped.sort_values("Period", kind="stable").reset_index(drop=True)
+    grouped = grouped.sort_values(["Period_Sort", "Period"], kind="stable").drop(columns=["Period_Sort"])
+    return grouped.reset_index(drop=True)
 
 
 def build_scrip_analysis_table(filtered_df: pd.DataFrame) -> pd.DataFrame:
@@ -3116,7 +3124,7 @@ def build_pivot_analysis_table(filtered_df: pd.DataFrame, granularity: str, valu
         return pd.DataFrame()
 
     working_df = filtered_df.copy()
-    working_df["Pivot Period"] = _build_pivot_period_column(working_df, granularity)
+    working_df["Pivot Period"], working_df["Pivot Sort"] = _build_period_label_and_sort(working_df["Entry Timestamp"], granularity)
     if value_metric == "Total Profit / Loss":
         pivot_df = pd.pivot_table(
             working_df,
@@ -3168,7 +3176,15 @@ def build_pivot_analysis_table(filtered_df: pd.DataFrame, granularity: str, valu
             fill_value=0.0,
         )
 
-    pivot_df = pivot_df.sort_index(kind="stable")
+    pivot_sort_df = (
+        working_df.loc[:, ["Pivot Period", "Pivot Sort"]]
+        .dropna(subset=["Pivot Period"])
+        .drop_duplicates(subset=["Pivot Period"])
+        .sort_values(["Pivot Sort", "Pivot Period"], kind="stable")
+    )
+    ordered_periods = pivot_sort_df["Pivot Period"].tolist()
+    if ordered_periods:
+        pivot_df = pivot_df.reindex(index=ordered_periods)
     pivot_df.columns = [str(column) for column in pivot_df.columns]
     pivot_df = pivot_df.reset_index().rename(columns={"Pivot Period": granularity})
     return pivot_df
@@ -3240,6 +3256,9 @@ def render_dashboard_box(
         "Avg Net Profit Per Trade",
         "Max Drawdown",
         "Interest / Month",
+        "Avg Monthly Net PL Before Interest",
+        "Monthly Interest",
+        "Net Prop PL Amt",
     }
 
     if percent and numeric_value is not None:
@@ -3665,7 +3684,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                     key="dashboard_prop_leverage",
                 )
                 interest_rate_pct = st.number_input(
-                    "Interest Rate (%)",
+                    "Annual Interest Rate (%)",
                     min_value=0.0,
                     value=float(st.session_state.get("dashboard_prop_interest_rate", 12.0)),
                     step=0.5,
@@ -3808,6 +3827,19 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     metrics["roi_pct"] = float(cost_metrics["roi_pct"])
     metrics["monthly_interest_total"] = float(cost_metrics["monthly_interest_total"])
     metrics["capital"] = float(cost_metrics["capital"])
+    closed_monthly_net_series = (
+        filtered_df.loc[filtered_df["is_closed"]]
+        .assign(MonthKey=pd.to_datetime(filtered_df.loc[filtered_df["is_closed"], "Entry Timestamp"], errors="coerce").dt.to_period("M"))
+        .dropna(subset=["MonthKey"])
+        .groupby("MonthKey")["PL Amt"]
+        .sum()
+    )
+    avg_monthly_net_before_interest = float(closed_monthly_net_series.mean()) if not closed_monthly_net_series.empty else 0.0
+    net_prop_pl_amt = avg_monthly_net_before_interest - float(cost_metrics["monthly_interest_total"])
+    monthly_roi_pct = (net_prop_pl_amt / float(cost_metrics["capital"]) * 100.0) if float(cost_metrics["capital"]) > 0 else 0.0
+    metrics["avg_monthly_net_before_interest"] = avg_monthly_net_before_interest
+    metrics["net_prop_pl_amt"] = net_prop_pl_amt
+    metrics["monthly_roi_pct"] = monthly_roi_pct
     summary_df = build_dashboard_summary_table(filtered_df)
 
     with st.container():
@@ -3838,12 +3870,41 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         render_dashboard_box(advanced_row_2[2], "Total Trades", metrics["total_trades"])
         advanced_row_3 = st.columns(3)
         render_dashboard_box(advanced_row_3[0], "Sharpe Ratio", metrics["sharpe_ratio"], force_green=metrics["sharpe_ratio"] > 0)
-        if prop_dashboard_enabled:
-            render_dashboard_box(advanced_row_3[1], "ROI %", metrics["roi_pct"], percent=True, force_green=metrics["roi_pct"] > 0)
-            render_dashboard_box(advanced_row_3[2], "Interest / Month", metrics["monthly_interest_total"], force_red=metrics["monthly_interest_total"] > 0)
-        else:
-            advanced_row_3[1].empty()
-            advanced_row_3[2].empty()
+        advanced_row_3[1].empty()
+        advanced_row_3[2].empty()
+
+    if prop_dashboard_enabled:
+        with st.container():
+            st.markdown("### Prop Specific View")
+            prop_row_1 = st.columns(2)
+            render_dashboard_box(
+                prop_row_1[0],
+                "Avg Monthly Net PL Before Interest",
+                metrics["avg_monthly_net_before_interest"],
+                force_green=metrics["avg_monthly_net_before_interest"] > 0,
+            )
+            render_dashboard_box(
+                prop_row_1[1],
+                "Monthly Interest",
+                metrics["monthly_interest_total"],
+                force_red=metrics["monthly_interest_total"] > 0,
+            )
+            prop_row_2 = st.columns(2)
+            render_dashboard_box(
+                prop_row_2[0],
+                "Net Prop PL Amt",
+                metrics["net_prop_pl_amt"],
+                force_green=metrics["net_prop_pl_amt"] > 0,
+                force_red=metrics["net_prop_pl_amt"] < 0,
+            )
+            render_dashboard_box(
+                prop_row_2[1],
+                "Monthly ROI %",
+                metrics["monthly_roi_pct"],
+                percent=True,
+                force_green=metrics["monthly_roi_pct"] > 0,
+                force_red=metrics["monthly_roi_pct"] < 0,
+            )
 
     with st.container():
         st.markdown("### Charts")
