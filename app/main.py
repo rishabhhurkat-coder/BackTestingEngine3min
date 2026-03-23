@@ -2768,7 +2768,8 @@ def apply_dashboard_cost_model(
     adjusted_df = filtered_df.copy()
     charges_per_trade = max(float(estimated_charges_per_trade or 0.0), 0.0)
     scrip_count = max(int(selected_scrip_count or 0), 0)
-    capital = max(float(avg_value_traded_per_lot or 0.0), 0.0) * 0.25 * 0.20 * scrip_count
+    capital_multiplier = 0.25 * 0.20 if prop_dashboard_enabled else 0.25
+    capital = max(float(avg_value_traded_per_lot or 0.0), 0.0) * capital_multiplier * scrip_count
     leverage_value = max(float(leverage or 0.0), 0.0)
     interest_rate_value = max(float(interest_rate_pct or 0.0), 0.0)
     monthly_interest_total = (
@@ -3671,19 +3672,18 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 step=10.0,
                 key="dashboard_estimated_charges_per_trade",
             )
-            avg_value_traded_per_lot = 0.0
+            avg_value_traded_per_lot = st.number_input(
+                "Average Value Traded Per Lot",
+                min_value=0.0,
+                value=float(st.session_state.get("dashboard_prop_avg_value_traded", 1000000.0)),
+                step=50000.0,
+                key="dashboard_prop_avg_value_traded",
+            )
+            st.caption(f"Display Value: {format_inr(avg_value_traded_per_lot)}")
             leverage = 1.0
             interest_rate_pct = 12.0
             capital_preview = 0.0
             if prop_dashboard_enabled:
-                avg_value_traded_per_lot = st.number_input(
-                    "Average Value Traded Per Lot",
-                    min_value=0.0,
-                    value=float(st.session_state.get("dashboard_prop_avg_value_traded", 1000000.0)),
-                    step=50000.0,
-                    key="dashboard_prop_avg_value_traded",
-                )
-                st.caption(f"Display Value: {format_inr(avg_value_traded_per_lot)}")
                 leverage = st.number_input(
                     "Leverage",
                     min_value=0.0,
@@ -3706,6 +3706,10 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 st.caption("Capital = Value Traded x 25% x 20% x Active Scrips")
                 st.caption("Interest / Month = Active Scrips x Value Traded x 25% x (Annual Interest Rate / 12)")
             else:
+                capital_preview = avg_value_traded_per_lot * 0.25 * active_scrip_count
+                st.metric("Capital", format_inr(capital_preview))
+                st.caption(f"Active Scrips in current filter: {active_scrip_count}")
+                st.caption("Capital = Value Traded x 25% x Active Scrips")
                 st.caption("Current mode deducts only the estimated charges per trade.")
     filters_text = (
         f"Entry Date: {filter_from_date:%d-%b-%Y} to {filter_to_date:%d-%b-%Y} | "
@@ -3846,10 +3850,13 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     avg_monthly_net_before_interest = float(closed_monthly_net_series.mean()) if not closed_monthly_net_series.empty else 0.0
     net_prop_pl_amt = avg_monthly_net_before_interest - float(cost_metrics["monthly_interest_total"])
     monthly_roi_pct = (net_prop_pl_amt / float(cost_metrics["capital"]) * 100.0) if float(cost_metrics["capital"]) > 0 else 0.0
+    regular_monthly_roi_pct = (avg_monthly_net_before_interest / float(cost_metrics["capital"]) * 100.0) if float(cost_metrics["capital"]) > 0 else 0.0
     metrics["no_of_months"] = int(len(closed_monthly_net_series))
+    metrics["avg_monthly_profit_loss"] = avg_monthly_net_before_interest
     metrics["avg_monthly_net_before_interest"] = avg_monthly_net_before_interest
     metrics["net_prop_pl_amt"] = net_prop_pl_amt
     metrics["monthly_roi_pct"] = monthly_roi_pct
+    metrics["regular_monthly_roi_pct"] = regular_monthly_roi_pct
     summary_df = build_dashboard_summary_table(filtered_df)
 
     with st.container():
@@ -3883,8 +3890,8 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         advanced_row_3[1].empty()
         advanced_row_3[2].empty()
 
-    if prop_dashboard_enabled:
-        with st.container():
+    with st.container():
+        if prop_dashboard_enabled:
             st.markdown("### Prop Specific View")
             prop_row_1 = st.columns(3)
             render_dashboard_box(
@@ -3900,7 +3907,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 force_red=metrics["monthly_interest_total"] > 0,
             )
             render_dashboard_box(prop_row_1[2], "No. of Months", metrics["no_of_months"])
-            prop_row_2 = st.columns(2)
+            prop_row_2 = st.columns(3)
             render_dashboard_box(
                 prop_row_2[0],
                 "Net Prop PL Amt",
@@ -3915,6 +3922,26 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 percent=True,
                 force_green=metrics["monthly_roi_pct"] > 0,
                 force_red=metrics["monthly_roi_pct"] < 0,
+            )
+            prop_row_2[2].empty()
+        else:
+            st.markdown("### Monthly View")
+            monthly_row = st.columns(3)
+            render_dashboard_box(
+                monthly_row[0],
+                "Avg Monthly Profit / Loss",
+                metrics["avg_monthly_profit_loss"],
+                force_green=metrics["avg_monthly_profit_loss"] > 0,
+                force_red=metrics["avg_monthly_profit_loss"] < 0,
+            )
+            render_dashboard_box(monthly_row[1], "No. of Months", metrics["no_of_months"])
+            render_dashboard_box(
+                monthly_row[2],
+                "Monthly ROI %",
+                metrics["regular_monthly_roi_pct"],
+                percent=True,
+                force_green=metrics["regular_monthly_roi_pct"] > 0,
+                force_red=metrics["regular_monthly_roi_pct"] < 0,
             )
 
     with st.container():
