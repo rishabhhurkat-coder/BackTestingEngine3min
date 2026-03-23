@@ -16,8 +16,10 @@ from uuid import uuid4
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
+from plotly.subplots import make_subplots
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -2080,6 +2082,7 @@ def filter_dashboard_trade_rows(
     start_date: Any,
     end_date: Any,
     include_open_trades: bool,
+    selected_scrips: list[str] | None = None,
 ) -> pd.DataFrame:
     if trade_df.empty:
         return trade_df.copy()
@@ -2089,6 +2092,10 @@ def filter_dashboard_trade_rows(
     start = pd.Timestamp(start_date).date()
     end = pd.Timestamp(end_date).date()
     filtered_df = filtered_df[(entry_dates >= start) & (entry_dates <= end)].copy()
+    if selected_scrips:
+        valid_scrips = {str(scrip).strip() for scrip in selected_scrips if str(scrip).strip()}
+        if valid_scrips:
+            filtered_df = filtered_df[filtered_df["Scrip"].astype(str).isin(valid_scrips)].copy()
     if not include_open_trades:
         filtered_df = filtered_df[filtered_df["is_closed"]].copy()
     return filtered_df.reset_index(drop=True)
@@ -3041,36 +3048,32 @@ def build_single_dashboard_chart_specs(summary_df: pd.DataFrame, filtered_df: pd
     style_dashboard_chart(win_loss_fig, height=340, hovermode=None)
 
     if metrics["equity_df"].empty:
-        equity_fig = None
-        drawdown_fig = None
-        time_series_fig = None
+        equity_drawdown_fig = None
     else:
-        equity_fig = px.line(
-            metrics["equity_df"],
-            x="Entry Timestamp",
-            y="Equity Curve",
-            title="Equity Curve",
-            color_discrete_sequence=[LIGHT_LINES[0]],
+        equity_drawdown_fig = make_subplots(specs=[[{"secondary_y": True}]])
+        equity_drawdown_fig.add_trace(
+            go.Scatter(
+                x=metrics["equity_df"]["Entry Timestamp"],
+                y=metrics["equity_df"]["Equity Curve"],
+                mode="lines",
+                name="Equity Curve",
+                line=dict(color=LIGHT_LINES[0], width=3),
+                fill="tozeroy",
+                fillcolor="rgba(37,99,235,0.18)",
+            ),
+            secondary_y=False,
         )
-        style_dashboard_chart(equity_fig, height=340, yaxis_title="Equity")
-
-        drawdown_fig = px.line(
-            metrics["equity_df"],
-            x="Entry Timestamp",
-            y="Drawdown",
-            title="Equity Drawdown",
-            color_discrete_sequence=[LIGHT_NEGATIVE],
+        equity_drawdown_fig.add_trace(
+            go.Scatter(
+                x=metrics["equity_df"]["Entry Timestamp"],
+                y=metrics["equity_df"]["Drawdown"],
+                mode="lines",
+                name="Drawdown",
+                line=dict(color=LIGHT_NEGATIVE, width=2, dash="dot"),
+            ),
+            secondary_y=True,
         )
-        style_dashboard_chart(drawdown_fig, height=420, yaxis_title="Drawdown")
-
-        time_series_fig = px.line(
-            metrics["equity_df"],
-            x="Entry Timestamp",
-            y="Equity Curve",
-            title="Equity Time Series",
-            color_discrete_sequence=[LIGHT_LINES[1]],
-        )
-        time_series_fig.update_xaxes(
+        equity_drawdown_fig.update_xaxes(
             rangeslider_visible=True,
             rangeselector=dict(
                 buttons=[
@@ -3082,18 +3085,19 @@ def build_single_dashboard_chart_specs(summary_df: pd.DataFrame, filtered_df: pd
                 ]
             ),
         )
-        style_dashboard_chart(time_series_fig, height=420, yaxis_title="Equity")
+        equity_drawdown_fig.update_yaxes(title_text="Equity Curve", secondary_y=False)
+        equity_drawdown_fig.update_yaxes(title_text="Drawdown", secondary_y=True)
+        equity_drawdown_fig.update_layout(title="Equity Curve & Drawdown")
+        style_dashboard_chart(equity_drawdown_fig, height=460, yaxis_title="")
 
-    overview = [
+    top_row = [
         ("Profit / Loss by Scrip", pnl_fig),
         ("Win vs Loss", win_loss_fig),
-        ("Equity Curve", equity_fig),
     ]
-    detailed = overview + [
-        ("Equity Drawdown", drawdown_fig),
-        ("Equity Time Series", time_series_fig),
+    bottom_row = [
+        ("Equity Curve & Drawdown", equity_drawdown_fig),
     ]
-    return overview, detailed
+    return top_row, bottom_row
 
 
 def build_strategy_dashboard_chart_specs(comparison_df: pd.DataFrame, strategy_equity_df: pd.DataFrame) -> tuple[list[tuple[str, Any]], list[tuple[str, Any]]]:
@@ -3211,6 +3215,7 @@ def build_strategy_comparison_dashboard(
     start_date: Any,
     end_date: Any,
     include_open_trades: bool,
+    selected_scrips: list[str] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     strategy_rows: list[dict[str, Any]] = []
     equity_rows: list[pd.DataFrame] = []
@@ -3220,7 +3225,13 @@ def build_strategy_comparison_dashboard(
             dashboard_folder_signature(strategy_dir),
             strategy_name=strategy_dir.name,
         )
-        filtered_df = filter_dashboard_trade_rows(strategy_df, start_date, end_date, include_open_trades)
+        filtered_df = filter_dashboard_trade_rows(
+            strategy_df,
+            start_date,
+            end_date,
+            include_open_trades,
+            selected_scrips=selected_scrips,
+        )
         metrics = build_dashboard_metrics(filtered_df)
         strategy_rows.append(
             {
@@ -3302,7 +3313,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Filters")
-        filter_col_a, filter_col_b = st.columns([1.1, 1.1])
+        filter_col_a, filter_col_b, filter_col_c = st.columns([1.0, 1.0, 1.3])
         with filter_col_a:
             filter_from_date = st.date_input(
                 "Entry Date From",
@@ -3321,11 +3332,28 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 format="DD/MM/YYYY",
                 key="dashboard_filter_to_date",
             )
+        available_scrips = sorted(reference_df["Scrip"].dropna().astype(str).unique().tolist(), key=str.lower)
+        with filter_col_c:
+            selected_dashboard_scrips = st.multiselect(
+                "Scrip",
+                options=available_scrips,
+                default=available_scrips,
+                format_func=display_symbol,
+                key="dashboard_filter_scrips",
+                help="This filter applies to KPI, charts, summary, drill-down, and PDF report.",
+            )
         include_open_trades = False
         if filter_from_date > filter_to_date:
             st.warning("From date cannot be after To date.")
             return
-    filters_text = f"Entry Date: {filter_from_date:%d-%b-%Y} to {filter_to_date:%d-%b-%Y} | Include Open Trades: No"
+    if not selected_dashboard_scrips:
+        st.warning("Please select at least one scrip.")
+        return
+    selected_scrips_text = ", ".join(display_symbol(scrip) for scrip in selected_dashboard_scrips)
+    filters_text = (
+        f"Entry Date: {filter_from_date:%d-%b-%Y} to {filter_to_date:%d-%b-%Y} | "
+        f"Scrips: {selected_scrips_text} | Include Open Trades: No"
+    )
 
     if strategy_mode_enabled and strategy_dirs:
         comparison_df, strategy_equity_df = build_strategy_comparison_dashboard(
@@ -3333,6 +3361,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             start_date=filter_from_date,
             end_date=filter_to_date,
             include_open_trades=include_open_trades,
+            selected_scrips=selected_dashboard_scrips,
         )
         if comparison_df.empty:
             st.warning("No data available")
@@ -3355,7 +3384,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             }
             best_dd_date = comparison_df.loc[comparison_df["Rank"].eq(1), "DD Date"].iloc[0] if not comparison_df.empty and comparison_df["Rank"].eq(1).any() else "-"
             comparison_download_df = comparison_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
-            _, strategy_chart_specs = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
+            strategy_chart_specs, strategy_extra_chart_specs = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
             render_dashboard_section_header(
                 "KPI Overview",
             )
@@ -3388,7 +3417,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                     summary_columns=["Strategy", "Rank", "Trades", "Win Rate %", "Total Profit / Loss", "Risk Reward Ratio", "Max Drawdown", "Score"],
                     detail_columns=["Strategy", "Rank", "Trades", "Total Profit Trades", "Total Loss Trades", "Win Rate %", "Total PL Amt", "Avg Profit Per Trade", "Avg Loss Per Trade", "Avg Net Profit Per Trade", "Sharpe Ratio", "Max Drawdown", "Drawdown Duration", "Risk Reward Ratio", "DD Date", "Score"],
                     detail_title="Strategy Comparison Detail",
-                    chart_specs=strategy_chart_specs,
+                    chart_specs=strategy_chart_specs + strategy_extra_chart_specs,
                     detail_group_column="Strategy",
                 ),
             )
@@ -3418,9 +3447,10 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
         with st.container():
             st.markdown("### Charts")
-            for index in range(0, len(strategy_chart_specs), 2):
+            all_strategy_chart_specs = strategy_chart_specs + strategy_extra_chart_specs
+            for index in range(0, len(all_strategy_chart_specs), 2):
                 row_cols = st.columns(2)
-                for cell, (_, fig) in zip(row_cols, strategy_chart_specs[index:index + 2]):
+                for cell, (_, fig) in zip(row_cols, all_strategy_chart_specs[index:index + 2]):
                     if fig is None:
                         cell.info("No data available")
                     else:
@@ -3457,7 +3487,13 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             )
         return
 
-    filtered_df = filter_dashboard_trade_rows(root_df, filter_from_date, filter_to_date, include_open_trades)
+    filtered_df = filter_dashboard_trade_rows(
+        root_df,
+        filter_from_date,
+        filter_to_date,
+        include_open_trades,
+        selected_scrips=selected_dashboard_scrips,
+    )
     if filtered_df.empty:
         st.warning("No data available")
         return
@@ -3468,7 +3504,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     with st.container():
         summary_display_df = summary_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
         detail_display_df = filtered_df.rename(columns={"PL Amt": "Profit / Loss"})
-        _, chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
+        top_chart_specs, lower_chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
         render_dashboard_section_header(
             "KPI Overview",
         )
@@ -3501,7 +3537,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 summary_columns=["Scrip", "Trades", "Closed Trades", "Open Trades", "Wins", "Losses", "Win Rate %", "Total Profit / Loss"],
                 detail_columns=["Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade", "Entry Price", "Exit Date", "Exit Time", "Exit Price", "Qty", "Profit / Loss", "Candle Analysis"],
                 detail_title="Trade Detail",
-                chart_specs=chart_specs,
+                chart_specs=top_chart_specs + lower_chart_specs,
                 detail_group_column="Scrip",
             ),
         )
@@ -3531,7 +3567,15 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Charts")
-        for chart_title, fig in chart_specs:
+        top_left, top_right = st.columns([1.2, 0.8])
+        for cell, (chart_title, fig) in zip((top_left, top_right), top_chart_specs):
+            with cell:
+                st.markdown(f"#### {chart_title}")
+                if fig is None:
+                    st.info("No data available")
+                else:
+                    st.plotly_chart(fig, width="stretch")
+        for chart_title, fig in lower_chart_specs:
             st.markdown(f"#### {chart_title}")
             if fig is None:
                 st.info("No data available")
@@ -3550,19 +3594,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Drill-Down")
-        scrip_list = sorted(filtered_df["Scrip"].dropna().astype(str).unique().tolist(), key=str.lower)
-        scrip_options = ["ALL"] + scrip_list
-        selected_scrips = st.multiselect(
-            "Select Scrip",
-            options=scrip_options,
-            default=["ALL"],
-            key="dashboard_selected_scrips",
-            format_func=lambda value: "ALL" if value == "ALL" else display_symbol(value),
-        )
-        if not selected_scrips or "ALL" in selected_scrips:
-            drilldown_df = filtered_df.copy()
-        else:
-            drilldown_df = filtered_df[filtered_df["Scrip"].isin(selected_scrips)].copy()
+        drilldown_df = filtered_df.copy()
         if drilldown_df.empty:
             st.warning("No data available")
             return
