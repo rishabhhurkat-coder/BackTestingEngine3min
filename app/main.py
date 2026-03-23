@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import base64
 import html
 import shutil
 import subprocess
@@ -2177,6 +2178,42 @@ def build_kpi_snapshot_svg(title: str, cards: list[dict[str, str]]) -> bytes:
     return "".join(svg_parts).encode("utf-8")
 
 
+def render_dashboard_section_header(title: str, download_bytes: bytes | None = None, filename: str | None = None) -> None:
+    left_col, right_col = st.columns([10, 1])
+    with left_col:
+        st.markdown(f"### {title}")
+    if download_bytes and filename:
+        download_token = base64.b64encode(download_bytes).decode("ascii")
+        href = f"data:image/svg+xml;base64,{download_token}"
+        with right_col:
+            st.markdown(
+                f"""
+                <div style="display:flex;justify-content:flex-end;align-items:center;padding-top:0.15rem;">
+                    <a
+                        href="{href}"
+                        download="{html.escape(filename)}"
+                        title="Download {html.escape(title)} image"
+                        style="
+                            display:inline-flex;
+                            align-items:center;
+                            justify-content:center;
+                            width:40px;
+                            height:40px;
+                            border-radius:999px;
+                            border:1px solid #dbe3ef;
+                            background:#f8fafc;
+                            color:#64748b;
+                            text-decoration:none;
+                            font-size:1.05rem;
+                            font-weight:700;
+                        "
+                    >&#128247;</a>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
 def _normalize_dashboard_score_series(series: pd.Series, *, inverse: bool = False) -> pd.Series:
     numeric = pd.to_numeric(series, errors="coerce").fillna(0.0).astype(float)
     if numeric.empty:
@@ -2395,10 +2432,10 @@ def render_dashboard_metric(
         value_color = "#b91c1c"
 
     font_size = "1.35rem" if compact_currency else "1.95rem"
-    min_height = "118px" if compact_currency else "112px"
+    min_height = "128px" if compact_currency else "142px"
     border_color = "#fecaca" if value_color == "#b91c1c" else "#dbe3ef"
     background_color = "#fef2f2" if value_color == "#b91c1c" else "#ffffff"
-    delta_html = ""
+    delta_html = '<div style="min-height:1.8rem;"></div>'
     if delta_value is not None and numeric_value is not None and not accent_color:
         delta_numeric = float(delta_value)
         if percent:
@@ -2411,9 +2448,9 @@ def render_dashboard_metric(
         delta_color = "#15803d" if delta_numeric >= 0 else "#b91c1c"
         delta_bg = "rgba(21,128,61,0.10)" if delta_numeric >= 0 else "rgba(185,28,28,0.10)"
         delta_html = (
-            f'<div style="display:inline-block;margin-top:0.55rem;padding:0.16rem 0.55rem;'
+            f'<div style="min-height:1.8rem;"><div style="display:inline-block;margin-top:0.55rem;padding:0.16rem 0.55rem;'
             f'border-radius:999px;background:{delta_bg};color:{delta_color};font-size:0.82rem;font-weight:600;">'
-            f'{html.escape(delta_text)}</div>'
+            f'{html.escape(delta_text)}</div></div>'
         )
 
     cell.markdown(
@@ -2425,6 +2462,9 @@ def render_dashboard_metric(
             border-radius:18px;
             background:{background_color};
             box-sizing:border-box;
+            display:flex;
+            flex-direction:column;
+            justify-content:space-between;
         ">
             <div style="font-size:0.95rem;color:#64748b;font-weight:600;line-height:1.2;min-height:2.2rem;">
                 {html.escape(label)}
@@ -2579,7 +2619,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             return
 
         with st.container():
-            st.markdown("### KPI Overview")
             comparison_metrics = {
                 "total_scrips": int(len(comparison_df)),
                 "total_trades": int(pd.to_numeric(comparison_df["Trades"], errors="coerce").fillna(0).sum()),
@@ -2594,23 +2633,26 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 "profit_trades": int(pd.to_numeric(comparison_df["Total Profit Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
                 "loss_trades": int(pd.to_numeric(comparison_df["Total Loss Trades"], errors="coerce").fillna(0).sum()) if not comparison_df.empty else 0,
             }
-            metric_cols = st.columns(6)
-            comparison_kpi_cards = [
-                render_dashboard_metric(metric_cols[0], "Strategies", comparison_metrics["total_scrips"]),
-                render_dashboard_metric(metric_cols[1], "Total Trades", comparison_metrics["total_trades"]),
-                render_dashboard_metric(metric_cols[2], "Total PL Amount", comparison_metrics["total_pl_amt"], comparison_metrics["total_pl_amt"], compact_currency=True),
-                render_dashboard_metric(metric_cols[3], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True),
-                render_dashboard_metric(metric_cols[4], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], comparison_metrics["sharpe_ratio"]),
-                render_dashboard_metric(metric_cols[5], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"], compact_currency=True),
+            comparison_preview_cards = [
+                {"label": "Strategies", "value": str(comparison_metrics["total_scrips"]), "color": "#0f172a"},
+                {"label": "Total Trades", "value": str(comparison_metrics["total_trades"]), "color": "#0f172a"},
+                {"label": "Total PL Amount", "value": format_inr_compact(comparison_metrics["total_pl_amt"]), "color": "#0f172a" if comparison_metrics["total_pl_amt"] >= 0 else "#b91c1c"},
+                {"label": "Win Rate %", "value": f'{comparison_metrics["win_rate"]:.2f}%', "color": "#0f172a"},
+                {"label": "Sharpe Ratio", "value": f'{comparison_metrics["sharpe_ratio"]:.2f}', "color": "#0f172a"},
+                {"label": "Max Drawdown", "value": format_inr_compact(comparison_metrics["max_drawdown"]), "color": "#b91c1c" if comparison_metrics["max_drawdown"] < 0 else "#0f172a"},
             ]
-            st.download_button(
-                "Download KPI Overview Image",
-                data=build_kpi_snapshot_svg("KPI Overview", comparison_kpi_cards),
-                file_name="kpi_overview.svg",
-                mime="image/svg+xml",
-                use_container_width=False,
-                key="download-dashboard-kpi-strategy",
+            render_dashboard_section_header(
+                "KPI Overview",
+                build_kpi_snapshot_svg("KPI Overview", comparison_preview_cards),
+                "kpi_overview.svg",
             )
+            metric_cols = st.columns(6)
+            render_dashboard_metric(metric_cols[0], "Strategies", comparison_metrics["total_scrips"])
+            render_dashboard_metric(metric_cols[1], "Total Trades", comparison_metrics["total_trades"])
+            render_dashboard_metric(metric_cols[2], "Total PL Amount", comparison_metrics["total_pl_amt"], comparison_metrics["total_pl_amt"], compact_currency=True)
+            render_dashboard_metric(metric_cols[3], "Win Rate %", comparison_metrics["win_rate"], comparison_metrics["win_rate"], percent=True)
+            render_dashboard_metric(metric_cols[4], "Sharpe Ratio", comparison_metrics["sharpe_ratio"], comparison_metrics["sharpe_ratio"])
+            render_dashboard_metric(metric_cols[5], "Max Drawdown", comparison_metrics["max_drawdown"], comparison_metrics["max_drawdown"], compact_currency=True)
 
         with st.container():
             st.markdown("### Advanced Metrics")
@@ -2745,7 +2787,19 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     summary_df = build_dashboard_summary_table(filtered_df)
 
     with st.container():
-        st.markdown("### KPI Overview")
+        preview_kpi_cards = [
+            {"label": "Total Scrips", "value": str(metrics["total_scrips"]), "color": "#0f172a"},
+            {"label": "Total Trades", "value": str(metrics["total_trades"]), "color": "#0f172a"},
+            {"label": "Total PL Amount", "value": format_inr_compact(metrics["total_pl_amt"]), "color": "#0f172a" if metrics["total_pl_amt"] >= 0 else "#b91c1c"},
+            {"label": "Win Rate %", "value": f'{metrics["win_rate"]:.2f}%', "color": "#0f172a"},
+            {"label": "Sharpe Ratio", "value": f'{metrics["sharpe_ratio"]:.2f}', "color": "#0f172a"},
+            {"label": "Max Drawdown", "value": format_inr_compact(metrics["max_drawdown"]), "color": "#b91c1c" if metrics["max_drawdown"] < 0 else "#0f172a"},
+        ]
+        render_dashboard_section_header(
+            "KPI Overview",
+            build_kpi_snapshot_svg("KPI Overview", preview_kpi_cards),
+            "kpi_overview.svg",
+        )
         metric_cols = st.columns(6)
         kpi_cards = [
             render_dashboard_metric(metric_cols[0], "Total Scrips", metrics["total_scrips"]),
@@ -2755,14 +2809,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             render_dashboard_metric(metric_cols[4], "Sharpe Ratio", metrics["sharpe_ratio"], metrics["sharpe_ratio"]),
             render_dashboard_metric(metric_cols[5], "Max Drawdown", metrics["max_drawdown"], metrics["max_drawdown"], compact_currency=True),
         ]
-        st.download_button(
-            "Download KPI Overview Image",
-            data=build_kpi_snapshot_svg("KPI Overview", kpi_cards),
-            file_name="kpi_overview.svg",
-            mime="image/svg+xml",
-            use_container_width=False,
-            key="download-dashboard-kpi-single",
-        )
 
     with st.container():
         st.markdown("### Advanced Metrics")
