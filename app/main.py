@@ -1799,6 +1799,14 @@ def _concat_non_empty_frames(frames: list[pd.DataFrame], *, fallback_columns: li
     return result
 
 
+def _normalize_dashboard_scrips(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "Scrip" not in df.columns:
+        return df
+    normalized = df.copy()
+    normalized["Scrip"] = normalized["Scrip"].fillna("").astype(str).str.strip().str.upper()
+    return normalized
+
+
 def _load_output_dashboard_rows(output_dir: Path) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for file_path in list_supported_data_files(output_dir):
@@ -3441,19 +3449,21 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     st.markdown(CARD_STYLE, unsafe_allow_html=True)
     root_signature = dashboard_folder_signature(output_dir)
     strategy_dirs = dashboard_strategy_dirs(output_dir)
-    strategy_mode_enabled = st.toggle(
-        "Enable Strategy Comparison",
+    prop_dashboard_enabled = st.toggle(
+        "Show Prop Dashboard",
         value=False,
-        key="dashboard_strategy_mode",
+        key="dashboard_prop_mode",
     )
-    if strategy_mode_enabled and not strategy_dirs:
-        st.info("No strategy subfolders were found. Showing the normal single-strategy dashboard.")
+    if prop_dashboard_enabled:
+        st.info("Currently to be implemented.")
+        return
+    strategy_mode_enabled = False
 
     if not root_signature and not strategy_dirs:
         st.warning("No Output Files found")
         return
 
-    root_df = load_dashboard_trade_rows(str(output_dir), root_signature, strategy_name="Current")
+    root_df = _normalize_dashboard_scrips(load_dashboard_trade_rows(str(output_dir), root_signature, strategy_name="Current"))
     if root_df.empty and not strategy_dirs:
         st.info("No trade data available")
         return
@@ -3462,11 +3472,11 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     if not root_df.empty:
         reference_frames.append(root_df)
     for strategy_dir in strategy_dirs:
-        strategy_df = load_dashboard_trade_rows(
+        strategy_df = _normalize_dashboard_scrips(load_dashboard_trade_rows(
             str(strategy_dir),
             dashboard_folder_signature(strategy_dir),
             strategy_name=strategy_dir.name,
-        )
+        ))
         if not strategy_df.empty:
             reference_frames.append(strategy_df)
     if not reference_frames:
@@ -3504,15 +3514,22 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 key="dashboard_filter_to_date",
             )
         available_scrips = sorted(reference_df["Scrip"].dropna().astype(str).unique().tolist(), key=str.lower)
+        scrip_filter_key = "dashboard_filter_scrips"
+        select_all_label = "SELECT ALL"
+        if scrip_filter_key not in st.session_state:
+            st.session_state[scrip_filter_key] = [select_all_label]
+        else:
+            prior_selection = [str(value or "").upper() for value in st.session_state.get(scrip_filter_key, [])]
+            chosen_scrips = [value for value in prior_selection if value != select_all_label and value in available_scrips]
+            st.session_state[scrip_filter_key] = [select_all_label] if select_all_label in prior_selection or len(chosen_scrips) == len(available_scrips) else chosen_scrips
         with filter_col_c:
-            selected_dashboard_scrips = st.multiselect(
+            raw_selected_scrips = st.multiselect(
                 "Scrip",
-                options=available_scrips,
-                default=available_scrips,
-                format_func=display_symbol,
-                key="dashboard_filter_scrips",
+                options=[select_all_label] + available_scrips,
+                key=scrip_filter_key,
                 help="This filter applies to KPI, charts, summary, drill-down, and PDF report.",
             )
+            selected_dashboard_scrips = available_scrips if select_all_label in raw_selected_scrips else raw_selected_scrips
         include_open_trades = False
         if filter_from_date > filter_to_date:
             st.warning("From date cannot be after To date.")
@@ -3520,7 +3537,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     if not selected_dashboard_scrips:
         st.warning("Please select at least one scrip.")
         return
-    selected_scrips_text = ", ".join(display_symbol(scrip) for scrip in selected_dashboard_scrips)
+    selected_scrips_text = select_all_label if len(selected_dashboard_scrips) == len(available_scrips) else ", ".join(display_symbol(scrip) for scrip in selected_dashboard_scrips)
     filters_text = (
         f"Entry Date: {filter_from_date:%d-%b-%Y} to {filter_to_date:%d-%b-%Y} | "
         f"Scrips: {selected_scrips_text} | Include Open Trades: No"
@@ -3621,7 +3638,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 style_dashboard_table(comparison_display_df),
                 width="stretch",
                 hide_index=True,
-                height=min(CHART_HEIGHT, 420),
+                height=_table_height_for_rows(len(comparison_display_df)),
             )
         return
 
@@ -3700,7 +3717,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             style_dashboard_table(time_analysis_df),
             width="stretch",
             hide_index=True,
-            height=min(CHART_HEIGHT, 420),
+            height=_table_height_for_rows(len(time_analysis_df)),
         )
 
     with st.container():
@@ -3710,12 +3727,12 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             style_dashboard_table(scrip_analysis_df),
             width="stretch",
             hide_index=True,
-            height=min(CHART_HEIGHT, 520),
+            height=_table_height_for_rows(len(scrip_analysis_df)),
         )
 
     with st.container():
         st.markdown("### Pivot View")
-        pivot_col_a, pivot_col_b, pivot_col_c = st.columns([1.0, 1.0, 1.0])
+        pivot_col_a, pivot_col_b = st.columns([1.0, 1.0])
         with pivot_col_a:
             pivot_granularity = st.selectbox(
                 "Time Group",
@@ -3730,55 +3747,23 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
                 index=0,
                 key="dashboard_pivot_value_metric",
             )
-        with pivot_col_c:
-            pivot_view_mode = st.selectbox(
-                "View",
-                options=["Table", "Heatmap"],
-                index=0,
-                key="dashboard_pivot_view_mode",
-            )
         pivot_df = build_pivot_analysis_table(filtered_df, pivot_granularity, pivot_value_metric)
         if pivot_df.empty:
             st.info("No data available")
-        elif pivot_view_mode == "Table":
+        else:
             st.dataframe(
                 style_pivot_table(pivot_df, pivot_value_metric),
                 width="stretch",
                 hide_index=True,
-                height=min(CHART_HEIGHT, 520),
+                height=_table_height_for_rows(len(pivot_df), min_height=220),
             )
-        else:
-            heatmap_source = pivot_df.set_index(pivot_df.columns[0])
-            heatmap_fig = px.imshow(
-                heatmap_source,
-                aspect="auto",
-                color_continuous_scale=["#7f1d1d", "#f8fafc", "#166534"] if pivot_value_metric in {"Total Profit / Loss", "Avg Net Profit Per Trade"} else ["#dbeafe", "#1d4ed8", "#1e3a8a"],
-                title=f"{pivot_value_metric} by {pivot_granularity} and Scrip",
-            )
-            style_dashboard_chart(
-                heatmap_fig,
-                height=460,
-                xaxis_title="Scrip",
-                yaxis_title=pivot_granularity,
-                hovermode=None,
-            )
-            st.plotly_chart(heatmap_fig, width="stretch")
 
     with st.container():
-        st.markdown("### Drill-Down")
+        st.markdown("### Scrip Trade Details")
         drilldown_df = filtered_df.copy()
         if drilldown_df.empty:
             st.warning("No data available")
             return
-        drilldown_closed_df = drilldown_df[drilldown_df["is_closed"]].copy()
-        drilldown_win_rate = (float(drilldown_closed_df["is_win"].sum()) / float(len(drilldown_closed_df)) * 100.0) if len(drilldown_closed_df) else 0.0
-        drilldown_returns = pd.to_numeric(drilldown_closed_df.get("PL Amt"), errors="coerce")
-        avg_profit_per_trade = float(drilldown_returns.where(drilldown_returns > 0).dropna().mean()) if not drilldown_closed_df.empty else 0.0
-        total_pl = float(pd.to_numeric(drilldown_df.get("PL Amt"), errors="coerce").fillna(0).sum()) if not drilldown_df.empty else 0.0
-        drill_metric_a, drill_metric_b, drill_metric_c = st.columns(3)
-        render_dashboard_metric(drill_metric_a, "Win Rate %", drilldown_win_rate, percent=True)
-        render_dashboard_metric(drill_metric_b, "Avg Profit Per Trade", avg_profit_per_trade)
-        render_dashboard_metric(drill_metric_c, "Total PL", total_pl)
         detail_columns = [
             "Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade",
             "Entry Price", "Exit Date", "Exit Time", "Exit Price",
@@ -3790,7 +3775,7 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             style_dashboard_table(detail_display_df),
             width="stretch",
             hide_index=True,
-            height=min(CHART_HEIGHT, 420),
+            height=_table_height_for_rows(len(detail_display_df)),
         )
 
 
