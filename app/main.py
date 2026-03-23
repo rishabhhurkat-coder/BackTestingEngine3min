@@ -19,6 +19,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
+from openpyxl.utils import get_column_letter
 from plotly.subplots import make_subplots
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -2686,6 +2687,55 @@ def _normalize_dashboard_score_series(series: pd.Series, *, inverse: bool = Fals
     return normalized
 
 
+def build_dashboard_excel_export(
+    *,
+    mode_label: str,
+    filters_text: str,
+    inputs_df: pd.DataFrame,
+    kpi_df: pd.DataFrame,
+    advanced_df: pd.DataFrame,
+    monthly_df: pd.DataFrame,
+    time_analysis_df: pd.DataFrame,
+    scrip_analysis_df: pd.DataFrame,
+    pivot_df: pd.DataFrame,
+    trade_details_df: pd.DataFrame,
+    equity_df: pd.DataFrame,
+) -> bytes:
+    buffer = BytesIO()
+    export_sheets: list[tuple[str, pd.DataFrame]] = [
+        ("KPI Overview", kpi_df),
+        ("Dashboard Inputs", inputs_df),
+        ("Advanced Metrics", advanced_df),
+        ("Monthly View", monthly_df),
+        ("Time Analysis", time_analysis_df),
+        ("Scrip Analysis", scrip_analysis_df),
+        ("Pivot View", pivot_df),
+        ("Scrip Trade Details", trade_details_df),
+        ("Equity Curve Data", equity_df),
+    ]
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        cover_df = pd.DataFrame(
+            [
+                {"Field": "Mode", "Value": mode_label},
+                {"Field": "Filters", "Value": filters_text},
+                {"Field": "Generated At", "Value": pd.Timestamp.now().strftime("%d-%b-%Y %I:%M %p")},
+            ]
+        )
+        cover_df.to_excel(writer, sheet_name="Overview", index=False)
+        for sheet_name, sheet_df in export_sheets:
+            safe_df = sheet_df.copy()
+            safe_df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        for sheet_name, worksheet in writer.sheets.items():
+            source_df = cover_df if sheet_name == "Overview" else next((df for name, df in export_sheets if name[:31] == sheet_name), pd.DataFrame())
+            for idx, column in enumerate(source_df.columns, start=1):
+                values = [str(column)] + [str(value) for value in source_df[column].fillna("")]
+                max_length = min(max((len(value) for value in values), default=10) + 2, 42)
+                worksheet.column_dimensions[get_column_letter(idx)].width = max_length
+            worksheet.freeze_panes = "A2"
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 def apply_strategy_scorecard(comparison_df: pd.DataFrame) -> pd.DataFrame:
     if comparison_df.empty:
         return comparison_df.copy()
@@ -3858,14 +3908,109 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
     metrics["monthly_roi_pct"] = monthly_roi_pct
     metrics["regular_monthly_roi_pct"] = regular_monthly_roi_pct
     summary_df = build_dashboard_summary_table(filtered_df)
+    time_granularity_value = str(st.session_state.get("dashboard_time_analysis_granularity", "Month"))
+    pivot_granularity_value = str(st.session_state.get("dashboard_pivot_granularity", "Month"))
+    pivot_value_metric_value = str(st.session_state.get("dashboard_pivot_value_metric", "Total Profit / Loss"))
+    time_analysis_df = build_time_analysis_table(
+        filtered_df,
+        time_granularity_value,
+        prop_dashboard_enabled=prop_dashboard_enabled,
+        monthly_interest_total=float(cost_metrics["monthly_interest_total"]),
+    )
+    scrip_analysis_df = build_scrip_analysis_table(filtered_df)
+    pivot_df = build_pivot_analysis_table(filtered_df, pivot_granularity_value, pivot_value_metric_value)
+    detail_columns = [
+        "Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade",
+        "Entry Price", "Exit Date", "Exit Time", "Exit Price",
+        "PL Points", "Qty", "Gross PL Amount", "Estimated Charges",
+        "Net PL Amount", "Candle Analysis",
+    ]
+    detail_columns = [column for column in detail_columns if column in filtered_df.columns]
+    detail_display_df = filtered_df.loc[:, detail_columns].rename(columns={"Estimated Charges": "Charges"})
+    inputs_rows = [
+        {"Field": "Mode", "Value": "Prop" if prop_dashboard_enabled else "Regular"},
+        {"Field": "Entry Date From", "Value": filter_from_date.strftime("%d-%b-%Y")},
+        {"Field": "Entry Date To", "Value": filter_to_date.strftime("%d-%b-%Y")},
+        {"Field": "Selected Scrips", "Value": selected_scrips_text},
+        {"Field": "Active Scrip Count", "Value": active_scrip_count},
+        {"Field": "Estimated Charges / Trade", "Value": estimated_charges_per_trade},
+        {"Field": "Average Value Traded Per Lot", "Value": avg_value_traded_per_lot},
+        {"Field": "Capital", "Value": metrics["capital"]},
+    ]
+    if prop_dashboard_enabled:
+        inputs_rows.extend(
+            [
+                {"Field": "Annual Interest Rate %", "Value": interest_rate_pct},
+                {"Field": "Leverage", "Value": leverage},
+                {"Field": "Interest / Month", "Value": metrics["monthly_interest_total"]},
+            ]
+        )
+    inputs_export_df = pd.DataFrame(inputs_rows)
+    kpi_export_rows = [
+        {"Metric": "Total Scrips", "Value": metrics["total_scrips"]},
+        {"Metric": "Total PL", "Value": metrics["total_pl_amt"]},
+        {"Metric": "Win Rate %", "Value": metrics["win_rate"]},
+        {"Metric": "Risk Reward Ratio", "Value": metrics["risk_reward_ratio"]},
+        {"Metric": "Max Drawdown", "Value": metrics["max_drawdown"]},
+        {"Metric": "DD Date", "Value": metrics["dd_date"]},
+    ]
+    advanced_export_rows = [
+        {"Metric": "Avg Profit Per Trade", "Value": metrics["avg_profit_per_trade"]},
+        {"Metric": "Avg Loss Per Trade", "Value": metrics["avg_loss_per_trade"]},
+        {"Metric": "Avg Net Profit Per Trade", "Value": metrics["avg_net_profit_per_trade"]},
+        {"Metric": "Total Profit Trades", "Value": metrics["wins"]},
+        {"Metric": "Total Loss Trades", "Value": metrics["losses"]},
+        {"Metric": "Total Trades", "Value": metrics["total_trades"]},
+        {"Metric": "Sharpe Ratio", "Value": metrics["sharpe_ratio"]},
+    ]
+    if prop_dashboard_enabled:
+        monthly_export_rows = [
+            {"Metric": "Avg Monthly Net PL Before Interest", "Value": metrics["avg_monthly_net_before_interest"]},
+            {"Metric": "Monthly Interest", "Value": metrics["monthly_interest_total"]},
+            {"Metric": "No. of Months", "Value": metrics["no_of_months"]},
+            {"Metric": "Net Prop PL Amt", "Value": metrics["net_prop_pl_amt"]},
+            {"Metric": "Monthly ROI %", "Value": metrics["monthly_roi_pct"]},
+        ]
+    else:
+        monthly_export_rows = [
+            {"Metric": "Avg Monthly Profit / Loss", "Value": metrics["avg_monthly_profit_loss"]},
+            {"Metric": "No. of Months", "Value": metrics["no_of_months"]},
+            {"Metric": "Monthly ROI %", "Value": metrics["regular_monthly_roi_pct"]},
+        ]
+    equity_export_df = metrics["equity_df"].copy()
+    if not equity_export_df.empty:
+        equity_export_df = equity_export_df.rename(columns={"PL Amt": "Net PL Amount"})
+    dashboard_excel_bytes = build_dashboard_excel_export(
+        mode_label="Prop" if prop_dashboard_enabled else "Regular",
+        filters_text=filters_text,
+        inputs_df=inputs_export_df,
+        kpi_df=pd.DataFrame(kpi_export_rows),
+        advanced_df=pd.DataFrame(advanced_export_rows),
+        monthly_df=pd.DataFrame(monthly_export_rows),
+        time_analysis_df=time_analysis_df,
+        scrip_analysis_df=scrip_analysis_df,
+        pivot_df=pivot_df,
+        trade_details_df=detail_display_df,
+        equity_df=equity_export_df,
+    )
 
     with st.container():
         summary_display_df = summary_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
-        detail_display_df = filtered_df.rename(columns={"PL Amt": "Profit / Loss"})
         top_chart_specs, lower_chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
-        render_dashboard_section_header(
-            "KPI Overview",
-        )
+        header_col, export_col = st.columns([0.7, 0.3])
+        with header_col:
+            render_dashboard_section_header(
+                "KPI Overview",
+            )
+        with export_col:
+            st.download_button(
+                "Export Dashboard to Excel",
+                data=dashboard_excel_bytes,
+                file_name=f"dashboard_{'prop' if prop_dashboard_enabled else 'regular'}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width="stretch",
+                key=f"dashboard-excel-export-{'prop' if prop_dashboard_enabled else 'regular'}",
+            )
         metric_row_1 = st.columns(3)
         render_dashboard_box(metric_row_1[0], "Total Scrips", metrics["total_scrips"])
         render_dashboard_box(metric_row_1[1], "Total PL", metrics["total_pl_amt"], force_green=metrics["total_pl_amt"] > 0)
@@ -3984,7 +4129,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     with st.container():
         st.markdown("### Scrip Analysis")
-        scrip_analysis_df = build_scrip_analysis_table(filtered_df)
         st.dataframe(
             style_dashboard_table(scrip_analysis_df),
             width="stretch",
@@ -4026,16 +4170,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         if drilldown_df.empty:
             st.warning("No data available")
             return
-        detail_columns = [
-            "Scrip", "Sr.No", "Entry Date", "Entry Time", "Trade",
-            "Entry Price", "Exit Date", "Exit Time", "Exit Price",
-            "PL Points", "Qty", "Gross PL Amount", "Estimated Charges",
-            "Net PL Amount", "Candle Analysis",
-        ]
-        detail_columns = [column for column in detail_columns if column in drilldown_df.columns]
-        detail_display_df = drilldown_df.loc[:, detail_columns].rename(
-            columns={"Estimated Charges": "Charges"}
-        )
         st.dataframe(
             style_dashboard_table(detail_display_df),
             width="stretch",
