@@ -2473,10 +2473,10 @@ def render_dashboard_box(
     )
 
 
-LIGHT_POSITIVE = "#86efac"
-LIGHT_NEGATIVE = "#fca5a5"
-LIGHT_NEUTRAL = "#e2e8f0"
-LIGHT_LINES = ["#93c5fd", "#86efac", "#f9a8d4", "#fdba74", "#c4b5fd", "#67e8f9"]
+LIGHT_POSITIVE = "#15803d"
+LIGHT_NEGATIVE = "#b91c1c"
+LIGHT_NEUTRAL = "#e5e7eb"
+LIGHT_LINES = ["#2563eb", "#0f766e", "#7c3aed", "#ea580c", "#0891b2", "#db2777"]
 
 
 def style_dashboard_chart(fig, *, height: int = 360, xaxis_title: str = "", yaxis_title: str = "", hovermode: str | None = "x unified"):
@@ -2500,10 +2500,10 @@ def style_dashboard_chart(fig, *, height: int = 360, xaxis_title: str = "", yaxi
     for trace in fig.data:
         trace_type = getattr(trace, "type", "")
         if trace_type == "bar":
-            trace.opacity = 0.72
+            trace.opacity = 0.9
         elif trace_type == "scatter":
             if hasattr(trace, "line"):
-                trace.line.width = 2
+                trace.line.width = 3
         elif trace_type == "pie":
             trace.opacity = 0.9
     return fig
@@ -2703,6 +2703,100 @@ def render_detailed_charts_panel(title: str, chart_specs: list[tuple[str, Any]])
                     st.plotly_chart(fig, use_container_width=True)
 
 
+@st.dialog("cha Analyis", width="large")
+def render_chart_analysis_dialog(output_dir: Path) -> None:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stDialog"] > div[role="dialog"] {
+            width: 96vw !important;
+            max-width: 96vw !important;
+        }
+        div[data-testid="stDialog"] section[tabindex="0"] {
+            max-height: 90vh !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    root_signature = dashboard_folder_signature(output_dir)
+    if not root_signature:
+        st.warning("No Output Files found")
+        return
+
+    root_df = load_dashboard_trade_rows(str(output_dir), root_signature, strategy_name="Current")
+    if root_df.empty:
+        st.info("No trade data available")
+        return
+
+    valid_entry_timestamps = root_df["Entry Timestamp"].dropna()
+    if valid_entry_timestamps.empty:
+        st.info("No valid trade data available")
+        return
+
+    min_entry_date = valid_entry_timestamps.min().date()
+    max_entry_date = valid_entry_timestamps.max().date()
+
+    filter_col_a, filter_col_b, filter_col_c = st.columns([1.1, 1.1, 0.9])
+    with filter_col_a:
+        chart_from_date = st.date_input(
+            "Entry Date From",
+            value=min_entry_date,
+            min_value=min_entry_date,
+            max_value=max_entry_date,
+            format="DD/MM/YYYY",
+            key="chart_analysis_from_date",
+        )
+    with filter_col_b:
+        chart_to_date = st.date_input(
+            "Entry Date To",
+            value=max_entry_date,
+            min_value=min_entry_date,
+            max_value=max_entry_date,
+            format="DD/MM/YYYY",
+            key="chart_analysis_to_date",
+        )
+    with filter_col_c:
+        include_open_trades = st.checkbox(
+            "Include Open Trades",
+            value=True,
+            key="chart_analysis_include_open",
+        )
+
+    if chart_from_date > chart_to_date:
+        st.warning("From date cannot be after To date.")
+        return
+
+    filtered_df = filter_dashboard_trade_rows(root_df, chart_from_date, chart_to_date, include_open_trades)
+    if filtered_df.empty:
+        st.warning("No data available")
+        return
+
+    metrics = build_dashboard_metrics(filtered_df)
+    summary_df = build_dashboard_summary_table(filtered_df)
+    _, chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
+    chart_names = [title for title, _ in chart_specs]
+    active_charts = st.multiselect(
+        "Activate / Deactivate Charts",
+        options=chart_names,
+        default=chart_names,
+        key="chart_analysis_active_charts",
+    )
+
+    if not active_charts:
+        st.info("Select at least one chart to display.")
+        return
+
+    for chart_title, fig in chart_specs:
+        if chart_title not in active_charts:
+            continue
+        st.markdown(f"### {chart_title}")
+        if fig is None:
+            st.info("No data available")
+        else:
+            st.plotly_chart(fig, use_container_width=True)
+
+
 def build_strategy_comparison_dashboard(
     output_dir: Path,
     start_date: Any,
@@ -2755,7 +2849,6 @@ def build_strategy_comparison_dashboard(
 def render_interactive_output_dashboard(output_dir: Path) -> None:
     st.markdown(CARD_STYLE, unsafe_allow_html=True)
     st.caption(f"Interactive dashboard based on the current Output Files folder: {output_dir}")
-    chart_focus_mode = st.session_state.get("dashboard_chart_focus")
     root_signature = dashboard_folder_signature(output_dir)
     strategy_dirs = dashboard_strategy_dirs(output_dir)
     strategy_mode_enabled = st.toggle(
@@ -2840,10 +2933,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         if comparison_df.empty:
             st.warning("No data available")
             return
-        if chart_focus_mode == "strategy":
-            _, detailed_chart_specs = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
-            render_detailed_charts_panel("Strategy Comparison Charts", detailed_chart_specs)
-            return
 
         with st.container():
             comparison_metrics = {
@@ -2895,20 +2984,15 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
             advanced_row_3[2].empty()
 
         with st.container():
-            charts_header_col, charts_toggle_col = st.columns([0.82, 0.18])
-            with charts_header_col:
-                st.markdown("### Charts")
-            with charts_toggle_col:
-                if st.button("🔍 Detailed View", key="dashboard_detailed_view_strategy", use_container_width=True):
-                    st.session_state["dashboard_chart_focus"] = "strategy"
-                    st.rerun()
-            overview_chart_specs, _ = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
-            top_left, top_center, top_right = st.columns(3)
-            for cell, (_, fig) in zip((top_left, top_center, top_right), overview_chart_specs):
-                if fig is None:
-                    cell.info("No data available")
-                else:
-                    cell.plotly_chart(fig, use_container_width=True)
+            st.markdown("### Charts")
+            _, strategy_chart_specs = build_strategy_dashboard_chart_specs(comparison_df, strategy_equity_df)
+            for index in range(0, len(strategy_chart_specs), 2):
+                row_cols = st.columns(2)
+                for cell, (_, fig) in zip(row_cols, strategy_chart_specs[index:index + 2]):
+                    if fig is None:
+                        cell.info("No data available")
+                    else:
+                        cell.plotly_chart(fig, use_container_width=True)
 
         with st.container():
             st.markdown("### Strategy Comparison")
@@ -2948,10 +3032,6 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
 
     metrics = build_dashboard_metrics(filtered_df)
     summary_df = build_dashboard_summary_table(filtered_df)
-    if chart_focus_mode == "single":
-        _, detailed_chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
-        render_detailed_charts_panel("Detailed Dashboard Charts", detailed_chart_specs)
-        return
 
     with st.container():
         summary_display_df = summary_df.rename(columns={"Total PL Amt": "Total Profit / Loss"})
@@ -2988,20 +3068,14 @@ def render_interactive_output_dashboard(output_dir: Path) -> None:
         advanced_row_3[2].empty()
 
     with st.container():
-        charts_header_col, charts_toggle_col = st.columns([0.82, 0.18])
-        with charts_header_col:
-            st.markdown("### Charts")
-        with charts_toggle_col:
-            if st.button("🔍 Detailed View", key="dashboard_detailed_view_single", use_container_width=True):
-                st.session_state["dashboard_chart_focus"] = "single"
-                st.rerun()
-        overview_chart_specs, _ = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
-        chart_a, chart_b, chart_c = st.columns(3)
-        for cell, (_, fig) in zip((chart_a, chart_b, chart_c), overview_chart_specs):
+        st.markdown("### Charts")
+        _, chart_specs = build_single_dashboard_chart_specs(summary_df, filtered_df, metrics)
+        for chart_title, fig in chart_specs:
+            st.markdown(f"#### {chart_title}")
             if fig is None:
-                cell.info("No data available")
+                st.info("No data available")
             else:
-                cell.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, use_container_width=True)
 
     with st.container():
         st.markdown("### Per-Scrip Summary")
@@ -3644,8 +3718,9 @@ def main() -> None:
             )
             st.markdown("<div style='height: 1.2rem;'></div>", unsafe_allow_html=True)
             if st.button("See Dashboard", use_container_width=True, key="open-output-dashboard"):
-                st.session_state["dashboard_chart_focus"] = None
                 render_output_dashboard_dialog(output_dir)
+            if st.button("cha Analyis", use_container_width=True, key="open-chart-analysis"):
+                render_chart_analysis_dialog(output_dir)
     else:
         from_date = st.date_input(
             "From Date",
