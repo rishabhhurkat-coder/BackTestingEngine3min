@@ -19,7 +19,9 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import LongTable, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .component import tv_chart_component, build_dir
 from .data_pipeline import extract_symbol, process_raw_folder
@@ -2211,6 +2213,52 @@ def render_dashboard_section_header(
             )
 
 
+def get_dashboard_pdf_fonts() -> tuple[str, str]:
+    regular_name = "Helvetica"
+    bold_name = "Helvetica-Bold"
+    font_candidates = [
+        (
+            "DashboardUnicode",
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+            "DashboardUnicode-Bold",
+            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+        ),
+        (
+            "DashboardUnicode",
+            Path("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+            "DashboardUnicode-Bold",
+            Path("/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf"),
+        ),
+        (
+            "DashboardUnicode",
+            Path("C:/Windows/Fonts/arial.ttf"),
+            "DashboardUnicode-Bold",
+            Path("C:/Windows/Fonts/arialbd.ttf"),
+        ),
+        (
+            "DashboardUnicode",
+            Path("C:/Windows/Fonts/segoeui.ttf"),
+            "DashboardUnicode-Bold",
+            Path("C:/Windows/Fonts/segoeuib.ttf"),
+        ),
+    ]
+
+    for reg_name, reg_path, bold_reg_name, bold_path in font_candidates:
+        try:
+            if not reg_path.exists():
+                continue
+            if reg_name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(reg_name, str(reg_path)))
+            if bold_path.exists() and bold_reg_name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(bold_reg_name, str(bold_path)))
+            regular_name = reg_name
+            bold_name = bold_reg_name if bold_path.exists() else reg_name
+            break
+        except Exception:
+            continue
+    return regular_name, bold_name
+
+
 def _pdf_escape_text(value: Any) -> str:
     if value is None:
         return "-"
@@ -2236,19 +2284,30 @@ def _format_dashboard_pdf_value(column: str, value: Any) -> str:
     return str(value)
 
 
-def _build_dashboard_pdf_table(df: pd.DataFrame, columns: list[str], *, title: str) -> list[Any]:
+def _build_dashboard_pdf_table(
+    df: pd.DataFrame,
+    columns: list[str],
+    *,
+    title: str,
+    regular_font: str,
+    bold_font: str,
+) -> list[Any]:
     styles = getSampleStyleSheet()
     if df.empty:
-        return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", styles["Heading3"]), Paragraph("No data available", styles["BodyText"])]
+        empty_heading = ParagraphStyle("PdfEmptyHeading", parent=styles["Heading3"], fontName=bold_font)
+        empty_body = ParagraphStyle("PdfEmptyBody", parent=styles["BodyText"], fontName=regular_font)
+        return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", empty_heading), Paragraph("No data available", empty_body)]
 
     safe_columns = [column for column in columns if column in df.columns]
     if not safe_columns:
-        return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", styles["Heading3"]), Paragraph("No valid columns available", styles["BodyText"])]
+        empty_heading = ParagraphStyle("PdfMissingHeading", parent=styles["Heading3"], fontName=bold_font)
+        empty_body = ParagraphStyle("PdfMissingBody", parent=styles["BodyText"], fontName=regular_font)
+        return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", empty_heading), Paragraph("No valid columns available", empty_body)]
 
     header_style = ParagraphStyle(
         "PdfHeader",
         parent=styles["BodyText"],
-        fontName="Helvetica-Bold",
+        fontName=bold_font,
         fontSize=8.5,
         leading=10,
         textColor=colors.white,
@@ -2256,6 +2315,7 @@ def _build_dashboard_pdf_table(df: pd.DataFrame, columns: list[str], *, title: s
     body_style = ParagraphStyle(
         "PdfBody",
         parent=styles["BodyText"],
+        fontName=regular_font,
         fontSize=8,
         leading=9.5,
         textColor=colors.HexColor("#0f172a"),
@@ -2286,7 +2346,8 @@ def _build_dashboard_pdf_table(df: pd.DataFrame, columns: list[str], *, title: s
             ]
         )
     )
-    return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", styles["Heading3"]), Spacer(1, 3 * mm), table]
+    table_heading = ParagraphStyle("PdfTableHeading", parent=styles["Heading3"], fontName=bold_font)
+    return [Paragraph(f"<b>{_pdf_escape_text(title)}</b>", table_heading), Spacer(1, 3 * mm), table]
 
 
 def build_dashboard_pdf_report(
@@ -2302,10 +2363,12 @@ def build_dashboard_pdf_report(
     detail_columns: list[str],
     detail_title: str = "Detailed Data",
 ) -> bytes:
+    regular_font, bold_font = get_dashboard_pdf_fonts()
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
         "PdfTitle",
         parent=styles["Title"],
+        fontName=bold_font,
         fontSize=18,
         leading=22,
         textColor=colors.HexColor("#0f172a"),
@@ -2313,6 +2376,7 @@ def build_dashboard_pdf_report(
     meta_style = ParagraphStyle(
         "PdfMeta",
         parent=styles["BodyText"],
+        fontName=regular_font,
         fontSize=8.5,
         leading=10,
         textColor=colors.HexColor("#475569"),
@@ -2320,8 +2384,17 @@ def build_dashboard_pdf_report(
     metric_style = ParagraphStyle(
         "PdfMetric",
         parent=styles["BodyText"],
+        fontName=regular_font,
         fontSize=8.5,
         leading=11,
+        textColor=colors.HexColor("#0f172a"),
+    )
+    section_style = ParagraphStyle(
+        "PdfSection",
+        parent=styles["Heading2"],
+        fontName=bold_font,
+        fontSize=12,
+        leading=14,
         textColor=colors.HexColor("#0f172a"),
     )
 
@@ -2341,7 +2414,7 @@ def build_dashboard_pdf_report(
             color = metric_color(title, value)
             markup = (
                 f"{_pdf_escape_text(title)}<br/>"
-                f"<font color=\"{color}\"><b>{_pdf_escape_text(display)}</b></font>"
+                f"<font name=\"{bold_font}\" color=\"{color}\">{_pdf_escape_text(display)}</font>"
             )
             cells.append(Paragraph(markup, metric_style))
         row_size = 3
@@ -2381,16 +2454,32 @@ def build_dashboard_pdf_report(
         Paragraph(f"Generated: {_pdf_escape_text(generated_at)}", meta_style),
         Paragraph(f"Filters: {_pdf_escape_text(filters_text)}", meta_style),
         Spacer(1, 4 * mm),
-        Paragraph("KPI Overview", styles["Heading2"]),
+        Paragraph("KPI Overview", section_style),
         build_metric_table(kpi_items),
         Spacer(1, 4 * mm),
-        Paragraph("Advanced Metrics", styles["Heading2"]),
+        Paragraph("Advanced Metrics", section_style),
         build_metric_table(advanced_items),
-        Spacer(1, 4 * mm),
     ]
-    elements.extend(_build_dashboard_pdf_table(summary_df, summary_columns, title="Summary"))
-    elements.append(Spacer(1, 4 * mm))
-    elements.extend(_build_dashboard_pdf_table(detail_df, detail_columns, title=detail_title))
+    elements.append(PageBreak())
+    elements.extend(
+        _build_dashboard_pdf_table(
+            summary_df,
+            summary_columns,
+            title="Summary",
+            regular_font=regular_font,
+            bold_font=bold_font,
+        )
+    )
+    elements.append(PageBreak())
+    elements.extend(
+        _build_dashboard_pdf_table(
+            detail_df,
+            detail_columns,
+            title=detail_title,
+            regular_font=regular_font,
+            bold_font=bold_font,
+        )
+    )
     doc.build(elements)
     buffer.seek(0)
     return buffer.getvalue()
