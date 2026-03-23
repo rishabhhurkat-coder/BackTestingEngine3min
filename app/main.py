@@ -1882,30 +1882,34 @@ DASHBOARD_EPSILON = 1e-9
 CARD_STYLE = """
 <style>
 .card {
-    padding: 12px 14px;
+    padding: 8px 12px;
     border-radius: 12px;
     background-color: #f9fafb;
     border: 1px solid #e5e7eb;
-    margin-bottom: 10px;
-    min-height: 104px;
+    margin-bottom: 8px;
+    min-height: 56px;
     box-sizing: border-box;
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     justify-content: space-between;
+    align-items: center;
+    gap: 10px;
 }
 .card-title {
     font-size: 13px;
     color: #6b7280;
     font-weight: 600;
     line-height: 1.25;
+    flex: 0 1 46%;
 }
 .card-value {
-    font-size: 20px;
+    font-size: 18px;
     font-weight: 600;
-    margin-top: 4px;
     color: #0f172a;
     line-height: 1.15;
     word-break: break-word;
+    text-align: right;
+    flex: 1 1 54%;
 }
 .card-green { color: #16a34a; }
 .card-red { color: #dc2626; }
