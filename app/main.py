@@ -3015,32 +3015,16 @@ def build_single_dashboard_chart_specs(summary_df: pd.DataFrame, filtered_df: pd
     style_dashboard_chart(win_loss_fig, height=340, hovermode=None)
 
     if metrics["equity_df"].empty:
-        equity_drawdown_fig = None
+        equity_curve_fig = None
     else:
-        equity_drawdown_fig = make_subplots(specs=[[{"secondary_y": True}]])
-        equity_drawdown_fig.add_trace(
-            go.Scatter(
-                x=metrics["equity_df"]["Entry Timestamp"],
-                y=metrics["equity_df"]["Equity Curve"],
-                mode="lines",
-                name="Equity Curve",
-                line=dict(color=LIGHT_LINES[0], width=3),
-                fill="tozeroy",
-                fillcolor="rgba(37,99,235,0.18)",
-            ),
-            secondary_y=False,
+        equity_curve_fig = px.area(
+            metrics["equity_df"],
+            x="Entry Timestamp",
+            y="Equity Curve",
+            title="Equity Curve",
+            color_discrete_sequence=[LIGHT_LINES[0]],
         )
-        equity_drawdown_fig.add_trace(
-            go.Scatter(
-                x=metrics["equity_df"]["Entry Timestamp"],
-                y=metrics["equity_df"]["Drawdown"],
-                mode="lines",
-                name="Drawdown",
-                line=dict(color=LIGHT_NEGATIVE, width=2, dash="dot"),
-            ),
-            secondary_y=True,
-        )
-        equity_drawdown_fig.update_xaxes(
+        equity_curve_fig.update_xaxes(
             rangeslider_visible=True,
             rangeselector=dict(
                 buttons=[
@@ -3052,17 +3036,14 @@ def build_single_dashboard_chart_specs(summary_df: pd.DataFrame, filtered_df: pd
                 ]
             ),
         )
-        equity_drawdown_fig.update_yaxes(title_text="Equity Curve", secondary_y=False)
-        equity_drawdown_fig.update_yaxes(title_text="Drawdown", secondary_y=True)
-        equity_drawdown_fig.update_layout(title="Equity Curve & Drawdown")
-        style_dashboard_chart(equity_drawdown_fig, height=460, yaxis_title="")
+        style_dashboard_chart(equity_curve_fig, height=460, yaxis_title="Equity Curve")
 
     top_row = [
         ("Profit / Loss by Scrip", pnl_fig),
         ("Win vs Loss", win_loss_fig),
     ]
     bottom_row = [
-        ("Equity Curve & Drawdown", equity_drawdown_fig),
+        ("Equity Curve", equity_curve_fig),
     ]
     return top_row, bottom_row
 
