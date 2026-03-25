@@ -49,6 +49,7 @@ type ChartProps = {
   indicators?: IndicatorSeries[];
   markers?: Marker[];
   chartType?: "Candlestick" | "Line Chart";
+  showSessionBreaks?: boolean;
   height?: number;
 };
 
@@ -279,6 +280,7 @@ const Chart = ({
   indicators = [],
   markers = [],
   chartType = "Candlestick",
+  showSessionBreaks = true,
   height = 600,
 }: ChartProps): React.ReactElement => {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -309,6 +311,7 @@ const Chart = ({
   const isReadyRef = useRef(false);
   const zoomedStateRef = useRef(false);
   const chartTypeRef = useRef<"Candlestick" | "Line Chart">("Candlestick");
+  const showSessionBreaksRef = useRef(true);
   const pendingClickTimerRef = useRef<number | null>(null);
   const pendingClickEpochRef = useRef<UTCTimestamp | null>(null);
 
@@ -516,6 +519,11 @@ const Chart = ({
       },
       []
     );
+    if (!showSessionBreaksRef.current) {
+      setSessionBreakXs([]);
+      drawSuperTrendFill();
+      return;
+    }
     setSessionBreakXs(nextSessionBreakXs);
     drawSuperTrendFill();
   };
@@ -912,6 +920,7 @@ const Chart = ({
     }));
     fullMarkerDataRef.current = normalizeMarkers(markers);
     chartTypeRef.current = chartType;
+    showSessionBreaksRef.current = showSessionBreaks;
     candleIndexByTimeRef.current = new Map(
       fullCandleDataRef.current.map((item, index) => [Number(item.time), index])
     );
@@ -926,7 +935,7 @@ const Chart = ({
 
     setHoveredCandle(null);
     applyVisibleData(true);
-  }, [candles, indicators, markers, chartType, height]);
+  }, [candles, indicators, markers, chartType, showSessionBreaks, height]);
 
   const handleDateSubmit = () => {
     if (!dateValue) {

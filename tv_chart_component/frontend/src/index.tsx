@@ -8,6 +8,7 @@ type StreamlitArgs = {
   indicators?: IndicatorSeries[];
   markers?: Marker[];
   chartType?: "Candlestick" | "Line Chart";
+  showSessionBreaks?: boolean;
   height?: number;
 };
 
@@ -17,6 +18,7 @@ const App = (props: any): React.ReactElement => {
   const indicators = args.indicators ?? [];
   const markers = args.markers ?? [];
   const chartType = args.chartType ?? "Candlestick";
+  const showSessionBreaks = args.showSessionBreaks ?? true;
   const height = args.height ?? 600;
 
   return (
@@ -25,6 +27,7 @@ const App = (props: any): React.ReactElement => {
       indicators={indicators}
       markers={markers}
       chartType={chartType}
+      showSessionBreaks={showSessionBreaks}
       height={height}
     />
   );

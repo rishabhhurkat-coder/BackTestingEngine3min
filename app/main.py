@@ -2039,6 +2039,7 @@ def render_edit_settings_dialog(
     indicator_enabled_config: dict[str, bool],
     indicator_line_width_config: dict[str, int],
     active_chart_type: str,
+    active_show_session_breaks: bool,
     default_from_date: Any,
     active_timeframe_label: str,
     exchange_label: str,
@@ -2065,6 +2066,11 @@ def render_edit_settings_dialog(
         ["Candlestick", "Line Chart"],
         index=0 if str(active_chart_type) == "Candlestick" else 1,
         key="edit-settings-chart-type",
+    )
+    show_session_breaks_value = st.toggle(
+        "Show Session Breaks",
+        value=bool(active_show_session_breaks),
+        key="edit-settings-show-session-breaks",
     )
     date_col_1, date_col_2 = st.columns(2, gap="small")
     with date_col_1:
@@ -2257,6 +2263,7 @@ def render_edit_settings_dialog(
                 st.session_state.selected_symbol = selected_symbol_value
                 st.session_state.qty = int(qty_value)
                 st.session_state.chart_type = str(chart_type_value)
+                st.session_state.show_session_breaks = bool(show_session_breaks_value)
                 st.session_state.filter_from_date = from_date_value
                 st.session_state.filter_to_date = to_date_value
                 st.session_state.chart_window_start = from_date_value
@@ -5334,6 +5341,7 @@ def main() -> None:
     st.session_state.setdefault("chart_payload_data", None)
     st.session_state.setdefault("selected_indicator_keys", [])
     st.session_state.setdefault("chart_type", "Candlestick")
+    st.session_state.setdefault("show_session_breaks", True)
     st.session_state.setdefault("trade_warning_dialog_token", 0)
     st.session_state.setdefault("trade_warning_dialog_shown_token", 0)
     st.session_state.setdefault("trade_warning_dialog_message", "")
@@ -5932,6 +5940,7 @@ def main() -> None:
             indicator_enabled_config=indicator_enabled_config,
             indicator_line_width_config=indicator_line_width_config,
             active_chart_type=str(st.session_state.get("chart_type") or "Candlestick"),
+            active_show_session_breaks=bool(st.session_state.get("show_session_breaks", True)),
             default_from_date=default_from_date,
             active_timeframe_label=active_timeframe_label,
             exchange_label=exchange_label,
@@ -6150,6 +6159,7 @@ def main() -> None:
             indicators=active_indicator_data,
             markers=build_markers(symbol),
             chartType=str(st.session_state.get("chart_type") or "Candlestick"),
+            showSessionBreaks=bool(st.session_state.get("show_session_breaks", True)),
             key=f"tv-lite-{symbol}-{st.session_state.chart_reset_nonce}-{build_signature}",
             height=CHART_HEIGHT,
         )
