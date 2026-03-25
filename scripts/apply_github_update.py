@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -16,6 +18,7 @@ from tkinter import BOTH, LEFT, RIGHT, X, StringVar, Tk, ttk
 APP_NAME = "EMA 200 Trades - Local"
 PRESERVE_NAMES = {"Main Folder", ".venv"}
 SHORTCUT_NAME = f"{APP_NAME}.lnk"
+REQUIREMENTS_HASH_FILE = ".requirements.sha256"
 
 
 class ProgressWindow:
@@ -106,6 +109,14 @@ def download_asset(asset_url: str, destination: Path, window: ProgressWindow) ->
                 )
 
 
+def file_sha256(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def copy_updated_files(source_dir: Path, target_dir: Path, window: ProgressWindow) -> None:
     all_paths = [path for path in source_dir.rglob("*") if path.name not in {"__pycache__"}]
     total = max(1, len(all_paths))
@@ -156,6 +167,39 @@ def ensure_shortcut(app_dir: Path) -> None:
     )
 
 
+def sync_python_dependencies(app_dir: Path, window: ProgressWindow) -> None:
+    venv_python = app_dir / ".venv" / "Scripts" / "python.exe"
+    python_executable = str(venv_python) if venv_python.exists() else sys.executable
+    requirements_path = app_dir / "requirements.txt"
+    if not requirements_path.exists():
+        return
+    requirements_hash = file_sha256(requirements_path)
+    requirements_hash_path = app_dir / REQUIREMENTS_HASH_FILE
+    previous_hash = (
+        requirements_hash_path.read_text(encoding="utf-8").strip()
+        if requirements_hash_path.exists()
+        else ""
+    )
+    if venv_python.exists() and previous_hash == requirements_hash:
+        window.set_progress(78, "Reusing existing Python packages...", requirements_path.name)
+        return
+
+    window.set_progress(78, "Updating Python packages...", requirements_path.name)
+    subprocess.run(
+        [python_executable, "-m", "pip", "install", "-r", str(requirements_path)],
+        check=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    requirements_hash_path.write_text(requirements_hash, encoding="utf-8")
+
+
+def cache_package_copy(app_dir: Path, package_path: Path, asset_url: str) -> None:
+    asset_name = Path(urllib.parse.urlparse(asset_url).path).name or package_path.name
+    dist_dir = app_dir / "dist"
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(package_path, dist_dir / asset_name)
+
+
 def main() -> int:
     args = parse_args()
     app_dir = Path(args.app_dir).resolve()
@@ -173,6 +217,7 @@ def main() -> int:
             wait_for_process_to_exit(wait_pid)
             window.set_progress(10, "Downloading update...", args.target_version)
             download_asset(asset_url, zip_path, window)
+            cache_package_copy(app_dir, zip_path, asset_url)
             window.set_progress(47, "Extracting update...", zip_path.name)
             extract_dir.mkdir(parents=True, exist_ok=True)
             with zipfile.ZipFile(zip_path, "r") as archive:
@@ -185,16 +230,7 @@ def main() -> int:
             )
             copy_updated_files(source_dir, app_dir, window)
 
-            venv_python = app_dir / ".venv" / "Scripts" / "python.exe"
-            python_executable = str(venv_python) if venv_python.exists() else sys.executable
-            requirements_path = app_dir / "requirements.txt"
-            if requirements_path.exists():
-                window.set_progress(78, "Updating Python packages...", requirements_path.name)
-                subprocess.run(
-                    [python_executable, "-m", "pip", "install", "-r", str(requirements_path)],
-                    check=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+            sync_python_dependencies(app_dir, window)
 
             window.set_progress(92, "Refreshing shortcut...", SHORTCUT_NAME)
             ensure_shortcut(app_dir)
